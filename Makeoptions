@@ -10,13 +10,15 @@ dof_dbg ?= no
 coverage ?= no
 verbose ?= no
 libfuse2 ?= no
+rbpf_backend ?= no
 
 help-options::
 	@printf "Options:\n\n" >&2
 	@printf "make debugging=yes [targets]\tDisable optimization to make debugger use easier\n" >&2
 	@printf "make coverage=yes [targets]\tTurn on coverage support in the testsuite\n" >&2
 	@printf "make verbose=yes [target]\tEnable verbose building\n" >&2
-	@printf "make dof_dbg=yes [targets]\tTurn on especially noisy DOF parser debugging\n\n" >&2
+	@printf "make dof_dbg=yes [targets]\tTurn on especially noisy DOF parser debugging\n" >&2
+	@printf "make rbpf_backend=yes [targets]\tEnable rbpf user-space BPF backend\n\n" >&2
 
 help-dependencies::
 	@printf "Dependencies:\n\n" >&2
@@ -43,4 +45,12 @@ endif
 
 ifneq ($(libfuse2),no)
 override WANTS_LIBFUSE2 = yes
+endif
+
+# rbpf backend for non-Linux platforms or user-space BPF execution
+ifneq ($(rbpf_backend),no)
+override CFLAGS += -DDT_BPF_BACKEND_RBPF
+# Link against the rbpf FFI library
+override LDFLAGS += -L$(objdir)/libdtrace/rbpf_ffi/target/release
+override LDLIBS += -lrbpf_ffi
 endif

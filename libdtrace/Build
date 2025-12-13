@@ -13,6 +13,10 @@ libdtrace-build_DIR := $(current-dir)
 libdtrace-build_SOURCES = dt_aggregate.c \
 			  dt_as.c \
 			  dt_bpf.c \
+			  dt_bpf_backend.c \
+			  dt_bpf_backend_linux.c \
+			  dt_bpf_backend_rbpf.c \
+			  dt_bpf_helpers_rbpf.c \
 			  dt_btf.c \
 			  dt_buf.c \
 			  dt_cc.c \
@@ -100,6 +104,10 @@ endif
 
 # Disable certain warnings for these files
 dt_bpf.c_CFLAGS := -Wno-pedantic
+dt_bpf_backend.c_CFLAGS := -Wno-pedantic
+dt_bpf_backend_linux.c_CFLAGS := -Wno-pedantic
+dt_bpf_backend_rbpf.c_CFLAGS := -Wno-pedantic
+dt_bpf_helpers_rbpf.c_CFLAGS := -Wno-pedantic
 dt_btf.c_CFLAGS := -Wno-pedantic
 dt_consume.c_CFLAGS := -Wno-pedantic
 dt_debug.c_CFLAGS := -Wno-prio-ctor-dtor

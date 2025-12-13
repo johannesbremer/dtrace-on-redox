@@ -1,0 +1,23 @@
+[package]
+name = "rbpf_ffi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Oracle"]
+description = "FFI bindings for rbpf to enable DTrace on non-Linux systems"
+license = "UPL-1.0"
+
+[lib]
+name = "rbpf_ffi"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+rbpf = "0.3"
+libc = "0.2"
+
+[features]
+default = ["std"]
+std = ["rbpf/std"]
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -1224,7 +1224,8 @@ dtrace_init(dtrace_hdl_t *dtp)
 	/*
 	 * Initialize the BPF library handling.
 	 */
-	dt_bpf_init(dtp);
+	if (dt_bpf_init(dtp) < 0)
+		return set_open_errno(dtp, errp, EDT_NOBPF);
 	dt_btf_get_module_ids(dtp);
 	dt_dlib_init(dtp);
 

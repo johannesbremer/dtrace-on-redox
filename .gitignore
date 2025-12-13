@@ -14,3 +14,5 @@ ncscope.*
 #
 /tags
 /*TAGS
+
+libdtrace/rbpf_ffi/target

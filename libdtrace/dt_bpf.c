@@ -8,9 +8,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <string.h>
-#include <linux/perf_event.h>
 #include <sys/ioctl.h>
-#include <sys/syscall.h>
 #include <dtrace.h>
 #include <dt_impl.h>
 #include <dt_dis.h>
@@ -21,14 +19,25 @@
 #include <dt_strtab.h>
 #include <dt_bpf.h>
 #include <dt_bpf_maps.h>
-#include <linux/btf.h>
 #include <dt_btf.h>
 #include <port.h>
+
+#if defined(__linux__)
+#include <linux/perf_event.h>
+#include <linux/btf.h>
+#include <sys/syscall.h>
+#endif
 
 static boolean_t	dt_gmap_done = 0;
 
 #define BPF_CG_LICENSE	"GPL";
 
+#if defined(__linux__)
+/*
+ * Linux-specific syscall wrappers for BPF and perf_event_open.
+ * These are only available on Linux; other platforms use the
+ * BPF backend abstraction layer.
+ */
 int
 dt_perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu,
 		   int group_fd, unsigned long flags)
@@ -48,6 +57,19 @@ dt_bpf(enum bpf_cmd cmd, union bpf_attr *attr)
 	rc = syscall(__NR_bpf, cmd, attr, sizeof(union bpf_attr));
 	return rc >= 0 ? rc : -errno;
 }
+#else
+/*
+ * Non-Linux stubs - operations go through the backend abstraction layer.
+ */
+int
+dt_perf_event_open(void *attr, pid_t pid, int cpu,
+		   int group_fd, unsigned long flags)
+{
+	return dt_bpf_backend->perf_event_open(attr, pid, cpu, group_fd, flags);
+}
+
+/* dt_bpf() not available on non-Linux - use backend directly */
+#endif
 
 static int
 dt_bpf_error(dtrace_hdl_t *dtp, const char *fmt, ...)
@@ -94,6 +116,7 @@ dt_bpf_lockmem_error(dtrace_hdl_t *dtp, const char *msg)
 			    , msg);
 }
 
+#if defined(__linux__)
 /*
  * Load a BPF program into the kernel (and attach it to an object by BTF id if
  * specified).
@@ -129,6 +152,27 @@ dt_bpf_prog_attach(enum bpf_prog_type ptype, enum bpf_attach_type atype,
 
 	return fd;
 }
+#else
+/*
+ * Non-Linux: load BPF program through backend abstraction.
+ */
+int
+dt_bpf_prog_attach(int ptype, int atype,
+		   int btf_fd, uint32_t btf_id, const dtrace_difo_t *dp,
+		   uint32_t log_level, char *log_buf, size_t log_buf_sz)
+{
+	(void)btf_fd;
+	(void)btf_id;
+	return dt_bpf_backend->prog_load((dt_bpf_prog_type_t)ptype,
+					 (dt_bpf_attach_type_t)atype,
+					 (const dt_bpf_insn_t *)dp->dtdo_buf,
+					 dp->dtdo_len,
+					 "GPL",
+					 log_level,
+					 log_buf,
+					 log_buf_sz);
+}
+#endif /* __linux__ */
 
 /*
  * Load the BPF program for a probe into the kernel.
@@ -140,6 +184,11 @@ dt_bpf_prog_load(dtrace_hdl_t *dtp, const dt_probe_t *prp,
 	return dt_bpf_prog_attach(prp->prov->impl->prog_type, 0, 0, 0, dp,
 				  lvl, buf, sz);
 }
+
+#if defined(__linux__)
+/*
+ * Linux-specific BTF operations using BPF syscalls.
+ */
 
 /*
  * Get BTF dict information based on its fd.
@@ -194,6 +243,33 @@ dt_bpf_btf_get_next_id(uint32_t curr, uint32_t *next)
 
 	return rc;
 }
+#else
+/*
+ * Non-Linux: BTF operations through backend abstraction.
+ */
+int
+dt_bpf_btf_get_info_by_fd(int fd, void *info, uint32_t *size)
+{
+	return dt_bpf_backend->btf_get_info_by_fd(fd, info, size);
+}
+
+int
+dt_bpf_btf_get_fd_by_id(uint32_t id)
+{
+	return dt_bpf_backend->btf_get_fd_by_id(id);
+}
+
+int
+dt_bpf_btf_get_next_id(uint32_t curr, uint32_t *next)
+{
+	return dt_bpf_backend->btf_get_next_id(curr, next);
+}
+#endif /* __linux__ */
+
+#if defined(__linux__)
+/*
+ * Linux-specific BPF map operations using syscalls.
+ */
 
 /*
  * Create a named BPF map.
@@ -341,6 +417,64 @@ dt_bpf_map_update(int fd, const void *key, const void *val)
 	return dt_bpf(BPF_MAP_UPDATE_ELEM, &attr);
 }
 
+#else
+/*
+ * Non-Linux: map operations through backend abstraction.
+ */
+static int
+dt_bpf_map_create(int map_type, const char *name,
+		  uint32_t key_size, uint32_t value_size, uint32_t max_entries,
+		  uint32_t map_flags)
+{
+	return dt_bpf_backend->map_create((dt_bpf_map_type_t)map_type, name,
+					  key_size, value_size, max_entries,
+					  map_flags);
+}
+
+static int
+dt_bpf_map_create_meta(int otype, const char *name,
+		       uint32_t oksz, uint32_t osize, uint32_t oflags,
+		       int itype,
+		       uint32_t iksz, uint32_t ivsz, uint32_t isize,
+		       uint32_t iflags)
+{
+	return dt_bpf_backend->map_create_meta((dt_bpf_map_type_t)otype, name,
+					       oksz, osize, oflags,
+					       (dt_bpf_map_type_t)itype,
+					       iksz, ivsz, isize, iflags);
+}
+
+int
+dt_bpf_map_get_fd_by_id(uint32_t id)
+{
+	return dt_bpf_backend->map_get_fd_by_id(id);
+}
+
+int
+dt_bpf_map_lookup(int fd, const void *key, void *val)
+{
+	return dt_bpf_backend->map_lookup(fd, key, val);
+}
+
+int
+dt_bpf_map_next_key(int fd, const void *key, void *nxt)
+{
+	return dt_bpf_backend->map_next_key(fd, key, nxt);
+}
+
+int
+dt_bpf_map_delete(int fd, const void *key)
+{
+	return dt_bpf_backend->map_delete(fd, key);
+}
+
+int
+dt_bpf_map_update(int fd, const void *key, const void *val)
+{
+	return dt_bpf_backend->map_update(fd, key, val, DT_BPF_ANY);
+}
+#endif /* __linux__ */
+
 /*
  * Retrieve the fd for a map-in-map, i.e. map[okey] which is the fd of a map.
  *
@@ -404,6 +538,7 @@ dt_bpf_map_update_inner(int fd, const void *okey, const void *ikey,
 int
 dt_bpf_raw_tracepoint_open(const void *tp, int fd)
 {
+#if defined(__linux__)
 	union bpf_attr	attr;
 
 	memset(&attr, 0, sizeof(attr));
@@ -411,8 +546,15 @@ dt_bpf_raw_tracepoint_open(const void *tp, int fd)
 	attr.raw_tracepoint.prog_fd = fd;
 
 	return dt_bpf(BPF_RAW_TRACEPOINT_OPEN, &attr);
+#else
+	return dt_bpf_backend->raw_tracepoint_open(tp, fd);
+#endif
 }
 
+#if defined(__linux__)
+/*
+ * Linux-specific helper detection and feature probing functions.
+ */
 static int
 have_helper(uint32_t func_id)
 {
@@ -517,10 +659,12 @@ fail:
 
 	return 0;
 }
+#endif /* __linux__ */
 
 static void
 dt_bpf_init_features(dtrace_hdl_t *dtp)
 {
+#if defined(__linux__)
 	uint32_t	btf_id;
 
 	btf_id = dt_btf_lookup_name_kind(dtp, dtp->dt_exec,
@@ -528,13 +672,39 @@ dt_bpf_init_features(dtrace_hdl_t *dtp)
 	if (btf_id >= 0 &&
 	    have_attach_type(BPF_PROG_TYPE_TRACING, BPF_TRACE_FENTRY, btf_id))
 		BPF_SET_FEATURE(dtp, BPF_FEAT_FENTRY);
+#else
+	/* Non-Linux: no BTF-based features available */
+	(void)dtp;
+#endif
 }
 
-void
+int
 dt_bpf_init(dtrace_hdl_t *dtp)
 {
+	int	rc;
+
+	/* Initialize the BPF backend abstraction layer */
+	rc = dt_bpf_backend_init_default();
+	if (rc != 0)
+		return rc;
+
+#if defined(__linux__)
 	dt_bpf_init_helpers(dtp);
+#else
+	/* Register user-space helper emulations for non-Linux platforms */
+	dt_bpf_register_rbpf_helpers();
+#endif
 	dt_bpf_init_features(dtp);
+	return 0;
+}
+
+/*
+ * Cleanup BPF backend resources.
+ */
+void
+dt_bpf_fini(void)
+{
+	dt_bpf_backend_cleanup();
 }
 
 static int

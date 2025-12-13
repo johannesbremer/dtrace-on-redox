@@ -15,6 +15,7 @@
 #include <dt_btf.h>
 #include <dt_impl.h>
 #include <dt_probe.h>
+#include <dt_bpf_backend.h>
 
 struct dtrace_hdl;
 
@@ -98,7 +99,8 @@ extern int dt_bpf_make_progs(struct dtrace_hdl *, uint_t);
 extern int dt_bpf_load_prog(dtrace_hdl_t *dtp, const dt_probe_t *prp,
 			    const dtrace_difo_t *dp, uint_t cflags);
 extern int dt_bpf_load_progs(struct dtrace_hdl *, uint_t);
-extern void dt_bpf_init(struct dtrace_hdl *dtp);
+extern int dt_bpf_init(struct dtrace_hdl *dtp);
+extern void dt_bpf_fini(void);
 
 #ifdef	__cplusplus
 }

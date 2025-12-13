@@ -653,6 +653,7 @@ enum {
 	EDT_TRACEMEM,		/* missing or corrupt tracemem() record */
 	EDT_PCAP,		/* missing or corrupt pcap() record */
 	EDT_PRINT,		/* missing or corrupt print() record */
+	EDT_NOBPF,		/* failed to initialize BPF backend */
 };
 
 /*
