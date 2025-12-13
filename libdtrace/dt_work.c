@@ -11,10 +11,16 @@
 #include <time.h>
 #include <libproc.h>
 #include <port.h>
+#if defined(__linux__)
 #include <linux/perf_event.h>
 #include <sys/epoll.h>
+#endif
 #ifdef HAVE_VALGRIND
 #include <valgrind/valgrind.h>
+#endif
+#ifdef __redox__
+#include <config_redox.h>
+#include <dt_bpf_backend.h>
 #endif
 #include <dt_impl.h>
 #include <dt_aggregate.h>
@@ -130,6 +136,8 @@ dtrace_status(dtrace_hdl_t *dtp)
 
 #define CMD_BEGIN	1234
 #define CMD_END		5678
+
+#if defined(__linux__)
 typedef struct dt_beginendargs {
 	pthread_t	thr;
 	processorid_t	cpu;
@@ -161,14 +169,6 @@ void bind_to_cpu(int cpu, int ncpus) {
 
 	/* Free the mask. */
 	CPU_FREE(mask);
-}
-
-static unsigned long long
-elapsed_msecs() {
-	struct timespec tstruct;
-
-	clock_gettime(CLOCK_MONOTONIC, &tstruct);
-	return tstruct.tv_sec * 1000ull + tstruct.tv_nsec / 1000000;
 }
 
 static void *
@@ -207,16 +207,28 @@ beginend_child(void *arg) {
 
 	pthread_exit(0);
 }
+#endif /* __linux__ */
+
+static unsigned long long
+elapsed_msecs(void) {
+	struct timespec tstruct;
+
+	clock_gettime(CLOCK_MONOTONIC, &tstruct);
+	return tstruct.tv_sec * 1000ull + tstruct.tv_nsec / 1000000;
+}
 
 int
 dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 {
 	size_t			size;
+#if defined(__linux__)
 	struct epoll_event	ev;
+#endif
 
 	if (dtp->dt_active)
 		return dt_set_errno(dtp, EINVAL);
 
+#if defined(__linux__)
 	/*
 	 * Create a child for the BEGIN and END probes if -xcpu is used.
 	 */
@@ -237,6 +249,7 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 		}
 		dtp->dt_beginendargs = args;
 	}
+#endif /* __linux__ */
 
 	/* Create the BPF programs. */
 	if (dt_bpf_make_progs(dtp, cflags) == -1)
@@ -250,6 +263,7 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 	if (dt_bpf_load_progs(dtp, cflags) == -1)
 		return -1;
 
+#if defined(__linux__)
 	/*
 	 * Set up the event polling file descriptor.
 	 */
@@ -266,17 +280,33 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 	if (epoll_ctl(dtp->dt_poll_fd, EPOLL_CTL_ADD, dtp->dt_proc_fd, &ev) ==
 	    -1)
 		return dt_set_errno(dtp, errno);
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, we don't use epoll. Polling is done via direct
+	 * BPF map reads. Set poll_fd to -1 to indicate no epoll.
+	 */
+	dtp->dt_poll_fd = -1;
+#endif
 
 	/*
 	 * The buffer needs to be large enough to hold at least one
 	 * perf-encapsulated trace data record.
 	 */
 	dtrace_getopt(dtp, "bufsize", &size);
+#if defined(__linux__)
 	if (size == 0 ||
 	    size < sizeof(struct perf_event_header) + dtp->dt_maxreclen)
 		return dt_set_errno(dtp, EDT_BUFTOOSMALL);
 	if (dt_pebs_init(dtp, size) == -1)
 		return dt_set_errno(dtp, EDT_NOMEM);
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, we use BPF maps for output instead of perf buffers.
+	 * The dt_pebs_init is skipped - output comes from BPF maps.
+	 */
+	if (size == 0 || size < dtp->dt_maxreclen)
+		return dt_set_errno(dtp, EDT_BUFTOOSMALL);
+#endif
 
 	/*
 	 * We must initialize the aggregation consumer handling before we
@@ -285,6 +315,7 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 	if (dt_aggregate_go(dtp) == -1)
 		return -1;
 
+#if defined(__linux__)
 	if (dtp->dt_beginendargs) {
 		/* Tell child running on a specific CPU to BEGIN. */
 		dt_beginendargs_t	*args = dtp->dt_beginendargs;
@@ -307,6 +338,13 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 	else
 #endif
 		BEGIN_probe();
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, fire BEGIN probe directly.
+	 * CPU affinity is not supported in self-trace mode.
+	 */
+	BEGIN_probe();
+#endif
 
 	dtp->dt_active = 1;
 	dtp->dt_beganon = dt_state_get_beganon(dtp);
@@ -331,6 +369,7 @@ dtrace_stop(dtrace_hdl_t *dtp)
 	if (dt_state_get_activity(dtp) < DT_ACTIVITY_DRAINING)
 		dt_state_set_activity(dtp, DT_ACTIVITY_DRAINING);
 
+#if defined(__linux__)
 	if (dtp->dt_beginendargs) {
 		int			cmd = CMD_END;
 		dt_beginendargs_t	*args = dtp->dt_beginendargs;
@@ -354,6 +393,12 @@ dtrace_stop(dtrace_hdl_t *dtp)
 	else
 #endif
 		END_probe();
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, fire END probe directly.
+	 */
+	END_probe();
+#endif
 
 	dtp->dt_stopped = 1;
 	dtp->dt_endedon = dt_state_get_endedon(dtp);

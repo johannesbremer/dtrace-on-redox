@@ -21,6 +21,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -31,7 +32,7 @@
  * Forward declarations for rbpf FFI bindings
  * These will be provided by a Rust library that wraps rbpf
  */
-#ifdef DT_BPF_BACKEND_RBPF
+#ifdef USE_RBPF_BACKEND
 
 /* External rbpf FFI functions - to be implemented in Rust */
 extern void *rbpf_vm_new(const uint8_t *prog, size_t prog_len);
@@ -43,7 +44,7 @@ extern uint64_t rbpf_vm_exec(void *vm, const uint8_t *mem, size_t mem_len);
 extern int rbpf_vm_jit_compile(void *vm);
 extern uint64_t rbpf_vm_exec_jit(void *vm, const uint8_t *mem, size_t mem_len);
 
-#endif /* DT_BPF_BACKEND_RBPF */
+#endif /* USE_RBPF_BACKEND */
 
 /*
  * Map implementation using user-space data structures
@@ -192,7 +193,7 @@ rbpf_backend_fini(void *ctx)
 	for (i = 0; i < RBPF_MAX_PROGS; i++) {
 		if (rbpf_ctx.progs[i].in_use) {
 			rbpf_prog_t *prog = &rbpf_ctx.progs[i];
-#ifdef DT_BPF_BACKEND_RBPF
+#ifdef USE_RBPF_BACKEND
 			if (prog->vm)
 				rbpf_vm_destroy(prog->vm);
 #endif
@@ -685,7 +686,7 @@ rbpf_prog_load(dt_bpf_prog_type_t type, dt_bpf_attach_type_t attach_type,
 	}
 	memcpy(prog->insns, insns, insn_cnt * sizeof(dt_bpf_insn_t));
 
-#ifdef DT_BPF_BACKEND_RBPF
+#ifdef USE_RBPF_BACKEND
 	/* Create rbpf VM instance */
 	prog->vm = rbpf_vm_new((const uint8_t *)prog->insns,
 			       insn_cnt * sizeof(dt_bpf_insn_t));
@@ -721,7 +722,7 @@ rbpf_prog_close(dt_bpf_prog_t handle)
 
 	prog = &rbpf_ctx.progs[handle];
 
-#ifdef DT_BPF_BACKEND_RBPF
+#ifdef USE_RBPF_BACKEND
 	if (prog->vm)
 		rbpf_vm_destroy(prog->vm);
 #endif
@@ -745,7 +746,7 @@ rbpf_prog_exec(dt_bpf_prog_t handle, void *mem, size_t mem_len)
 
 	prog = &rbpf_ctx.progs[handle];
 
-#ifdef DT_BPF_BACKEND_RBPF
+#ifdef USE_RBPF_BACKEND
 	if (!prog->vm) {
 		errno = EINVAL;
 		return (uint64_t)-1;
@@ -782,7 +783,7 @@ rbpf_prog_jit_compile(dt_bpf_prog_t handle)
 
 	prog = &rbpf_ctx.progs[handle];
 
-#ifdef DT_BPF_BACKEND_RBPF
+#ifdef USE_RBPF_BACKEND
 	if (!prog->vm) {
 		errno = EINVAL;
 		return -1;
@@ -814,7 +815,7 @@ rbpf_prog_exec_jit(dt_bpf_prog_t handle, void *mem, size_t mem_len)
 
 	prog = &rbpf_ctx.progs[handle];
 
-#ifdef DT_BPF_BACKEND_RBPF
+#ifdef USE_RBPF_BACKEND
 	if (!prog->vm || !prog->jit_compiled) {
 		errno = EINVAL;
 		return (uint64_t)-1;

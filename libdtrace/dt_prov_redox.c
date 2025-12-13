@@ -14,12 +14,13 @@
  *   - dtrace:::BEGIN - fires at start of tracing
  *   - dtrace:::END   - fires at end of tracing
  *   - dtrace:::ERROR - fires on errors
- *   - profile:::tick-* - timer-based probes (emulated)
- *   - pid$target:::entry/return - self function tracing
+ *   - profile:::tick-* - timer-based probes (polling-based)
+ *
+ * Note: This implementation uses polling instead of POSIX timers
+ * since relibc doesn't fully support timer_create/sigevent.
  */
 
 #include <errno.h>
-#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,10 +41,10 @@ typedef struct redox_trace_ctx {
 	uint64_t	start_time;	/* Tracing start time */
 	uint64_t	probe_count;	/* Number of probes fired */
 	
-	/* Timer for profile probes */
-	timer_t		timer_id;
+	/* Timer for profile probes (polling-based) */
 	int		timer_active;
 	uint64_t	tick_interval_ns;
+	uint64_t	last_tick_time;
 	
 	/* Callback for probe firing */
 	void		(*probe_callback)(int probe_id, void *arg);
@@ -73,23 +74,6 @@ get_time_ns(void)
 }
 
 /*
- * Signal handler for timer-based probes
- */
-static void
-timer_signal_handler(int sig, siginfo_t *si, void *uc)
-{
-	(void)sig;
-	(void)si;
-	(void)uc;
-	
-	if (g_trace_ctx.active && g_trace_ctx.probe_callback) {
-		g_trace_ctx.probe_count++;
-		g_trace_ctx.probe_callback(REDOX_PROBE_TICK,
-					   g_trace_ctx.callback_arg);
-	}
-}
-
-/*
  * Initialize the RedoxOS self-trace provider
  */
 int
@@ -108,10 +92,7 @@ redox_trace_init(void)
 void
 redox_trace_fini(void)
 {
-	if (g_trace_ctx.timer_active) {
-		timer_delete(g_trace_ctx.timer_id);
-		g_trace_ctx.timer_active = 0;
-	}
+	g_trace_ctx.timer_active = 0;
 	g_trace_ctx.active = 0;
 }
 
@@ -145,55 +126,53 @@ redox_trace_stop(void)
 					   g_trace_ctx.callback_arg);
 	
 	g_trace_ctx.active = 0;
-	
-	if (g_trace_ctx.timer_active) {
-		timer_delete(g_trace_ctx.timer_id);
-		g_trace_ctx.timer_active = 0;
-	}
+	g_trace_ctx.timer_active = 0;
 	
 	return 0;
 }
 
 /*
  * Enable a profile/tick probe with the specified interval
+ *
+ * Note: This uses a polling model instead of POSIX timers.
+ * The caller must periodically call redox_trace_poll() to
+ * fire tick probes.
  */
 int
 redox_trace_enable_tick(uint64_t interval_ns)
 {
-	struct sigevent sev;
-	struct itimerspec its;
-	struct sigaction sa;
-	
 	if (g_trace_ctx.timer_active)
 		return -EBUSY;
 	
-	/* Set up signal handler */
-	sa.sa_flags = SA_SIGINFO;
-	sa.sa_sigaction = timer_signal_handler;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(SIGRTMIN, &sa, NULL) == -1)
-		return -errno;
-	
-	/* Create timer */
-	sev.sigev_notify = SIGEV_SIGNAL;
-	sev.sigev_signo = SIGRTMIN;
-	sev.sigev_value.sival_ptr = &g_trace_ctx.timer_id;
-	
-	if (timer_create(CLOCK_MONOTONIC, &sev, &g_trace_ctx.timer_id) == -1)
-		return -errno;
-	
-	/* Set timer interval */
-	its.it_value.tv_sec = interval_ns / 1000000000;
-	its.it_value.tv_nsec = interval_ns % 1000000000;
-	its.it_interval = its.it_value;
-	
-	if (timer_settime(g_trace_ctx.timer_id, 0, &its, NULL) == -1) {
-		timer_delete(g_trace_ctx.timer_id);
-		return -errno;
-	}
-	
-	g_trace_ctx.timer_active = 1;
 	g_trace_ctx.tick_interval_ns = interval_ns;
+	g_trace_ctx.last_tick_time = get_time_ns();
+	g_trace_ctx.timer_active = 1;
+	
+	return 0;
+}
+
+/*
+ * Poll for tick probes - call this periodically from the main loop
+ */
+int
+redox_trace_poll(void)
+{
+	uint64_t now;
+	
+	if (!g_trace_ctx.active || !g_trace_ctx.timer_active)
+		return 0;
+	
+	now = get_time_ns();
+	
+	if (now - g_trace_ctx.last_tick_time >= g_trace_ctx.tick_interval_ns) {
+		g_trace_ctx.last_tick_time = now;
+		g_trace_ctx.probe_count++;
+		
+		if (g_trace_ctx.probe_callback)
+			g_trace_ctx.probe_callback(REDOX_PROBE_TICK,
+						   g_trace_ctx.callback_arg);
+		return 1;
+	}
 	
 	return 0;
 }

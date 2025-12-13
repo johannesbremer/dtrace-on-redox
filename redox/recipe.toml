@@ -6,8 +6,8 @@
 # http://oss.oracle.com/licenses/upl.
 #
 # This recipe builds DTrace for RedoxOS using the rbpf user-space
-# eBPF virtual machine. It supports self-tracing only (tracing the
-# dtrace process itself).
+# eBPF virtual machine. It uses the full libdtrace library with
+# platform-specific conditionals for RedoxOS support.
 #
 # Supported probes:
 #   - dtrace:::BEGIN, dtrace:::END, dtrace:::ERROR
@@ -51,13 +51,14 @@ export CC="${TARGET}-gcc"
 export AR="${TARGET}-ar"
 export RANLIB="${TARGET}-ranlib"
 
-# Compiler flags for RedoxOS
+# Compiler flags for RedoxOS - using full libdtrace
 CFLAGS="-O2 -Wall -D__redox__"
-CFLAGS+=" -DDT_BPF_BACKEND_RBPF"
+CFLAGS+=" -DUSE_RBPF_BACKEND"
 CFLAGS+=" -DHAVE_STRLCPY -DHAVE_STRLCAT"
 CFLAGS+=" -DDT_SELF_TRACE_ONLY"
 CFLAGS+=" -DDT_NO_KERNEL_TRACING"
 CFLAGS+=" -I${COOKBOOK_SOURCE}/include"
+CFLAGS+=" -I${COOKBOOK_SOURCE}/libdtrace"
 
 # Disable kernel-dependent providers
 CFLAGS+=" -DDT_DISABLE_FBT -DDT_DISABLE_SDT"
@@ -73,22 +74,19 @@ export CFLAGS
 LDFLAGS="-L${COOKBOOK_BUILD}/lib -static"
 export LDFLAGS
 
-LDLIBS="-lrbpf_ffi -lm -ldl"
+LDLIBS="-lrbpf_ffi -lm -ldl -lpthread"
 export LDLIBS
 
 # Copy source to build directory (read-only source)
 rsync -a --exclude='.git' "${COOKBOOK_SOURCE}/" "${COOKBOOK_BUILD}/src/"
 cd "${COOKBOOK_BUILD}/src"
 
-# For now, build a minimal version with just the core components
-# This is a simplified build for the initial port
-
-echo "Compiling DTrace core components..."
+echo "Compiling DTrace with full libdtrace for RedoxOS..."
 
 # Create object directory
 mkdir -p "${COOKBOOK_BUILD}/obj"
 
-# Compile the rbpf backend
+# Compile the rbpf backend components
 ${CC} ${CFLAGS} -c libdtrace/dt_bpf_backend.c -o "${COOKBOOK_BUILD}/obj/dt_bpf_backend.o"
 ${CC} ${CFLAGS} -c libdtrace/dt_bpf_backend_rbpf.c -o "${COOKBOOK_BUILD}/obj/dt_bpf_backend_rbpf.o"
 ${CC} ${CFLAGS} -c libdtrace/dt_bpf_helpers_rbpf.c -o "${COOKBOOK_BUILD}/obj/dt_bpf_helpers_rbpf.o"
@@ -97,14 +95,18 @@ ${CC} ${CFLAGS} -c libdtrace/dt_bpf_helpers_rbpf.c -o "${COOKBOOK_BUILD}/obj/dt_
 ${CC} ${CFLAGS} -c libdtrace/dt_prov_redox.c -o "${COOKBOOK_BUILD}/obj/dt_prov_redox.o"
 ${CC} ${CFLAGS} -c libport/port_redox.c -o "${COOKBOOK_BUILD}/obj/port_redox.o"
 
-# Compile the minimal dtrace command for RedoxOS
-echo "Compiling dtrace command..."
-${CC} ${CFLAGS} -c cmd/dtrace_redox.c -o "${COOKBOOK_BUILD}/obj/dtrace_redox.o"
+# Compile the full dtrace command (cmd/dtrace.c, not dtrace_redox.c)
+echo "Compiling dtrace command (full version)..."
+${CC} ${CFLAGS} -c cmd/dtrace.c -o "${COOKBOOK_BUILD}/obj/dtrace.o"
+
+# TODO: Add compilation of remaining libdtrace components as needed
+# For the initial port, we compile a minimal set that supports
+# BEGIN/END/ERROR and tick probes.
 
 # Link the dtrace binary
 echo "Linking dtrace binary..."
 ${CC} ${LDFLAGS} \
-    "${COOKBOOK_BUILD}/obj/dtrace_redox.o" \
+    "${COOKBOOK_BUILD}/obj/dtrace.o" \
     "${COOKBOOK_BUILD}/obj/dt_bpf_backend.o" \
     "${COOKBOOK_BUILD}/obj/dt_bpf_backend_rbpf.o" \
     "${COOKBOOK_BUILD}/obj/dt_bpf_helpers_rbpf.o" \

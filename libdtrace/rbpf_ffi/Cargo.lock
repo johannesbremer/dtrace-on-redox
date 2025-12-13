@@ -117,8 +117,6 @@ dependencies = [
 [[package]]
 name = "rbpf"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "463d0b79f93dd962cc115e33f11971bf025c85943d726322c812d98c9f8ecb5b"
 dependencies = [
  "byteorder",
  "combine",

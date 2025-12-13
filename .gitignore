@@ -17,3 +17,4 @@ ncscope.*
 
 libdtrace/rbpf_ffi/target
 demo_build
+.DS_Store

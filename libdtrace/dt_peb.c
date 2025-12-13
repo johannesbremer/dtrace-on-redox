@@ -7,15 +7,22 @@
 
 #include <assert.h>
 #include <errno.h>
+#if defined(__linux__)
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/perf_event.h>
+#endif
 
 #include <dt_impl.h>
 #include <dt_bpf.h>
 #include <dt_peb.h>
 
+#ifdef __redox__
+#include <config_redox.h>
+#endif
+
+#if defined(__linux__)
 /*
  * Find last set bit in a 64-bit value.
  */
@@ -114,6 +121,7 @@ fail:
 
 	return -1;
 }
+#endif /* __linux__ */
 
 /*
  * Perform cleanup of the perf event buffers.
@@ -121,6 +129,7 @@ fail:
 void
 dt_pebs_exit(dtrace_hdl_t *dtp)
 {
+#if defined(__linux__)
 	int	i;
 
 	if (dtp->dt_pebset == NULL)
@@ -133,6 +142,10 @@ dt_pebs_exit(dtrace_hdl_t *dtp)
 	dt_free(dtp, dtp->dt_pebset);
 
 	dtp->dt_pebset = NULL;
+#else
+	/* On non-Linux platforms, perf buffers are not used */
+	(void)dtp;
+#endif
 }
 
 /*
@@ -149,6 +162,7 @@ dt_pebs_exit(dtrace_hdl_t *dtp)
  */
 int dt_pebs_init(dtrace_hdl_t *dtp, size_t bufsize)
 {
+#if defined(__linux__)
 	int		i;
 	int		mapfd;
 	size_t		num_pages;
@@ -242,4 +256,19 @@ fail:
 	dt_pebs_exit(dtp);
 
 	return -1;
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, perf event buffers are not available.
+	 * Output is handled via BPF maps with the rbpf backend.
+	 * This function is a no-op - output collection happens differently.
+	 */
+	(void)dtp;
+	(void)bufsize;
+	return 0;
+#else
+	/* Unsupported platform */
+	(void)dtp;
+	(void)bufsize;
+	return -ENOTSUP;
+#endif
 }

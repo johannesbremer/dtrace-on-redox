@@ -24,9 +24,15 @@
 #include <dt_string.h>
 #include <libproc.h>
 #include <port.h>
+#if defined(__linux__)
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <linux/perf_event.h>
+#endif
+#ifdef __redox__
+#include <config_redox.h>
+#include <dt_bpf_backend.h>
+#endif
 
 #define	DT_MASK_LO 0x00000000FFFFFFFFULL
 
@@ -2810,7 +2816,9 @@ dtrace_consume(dtrace_hdl_t *dtp, FILE *fp, dtrace_consume_probe_f *pf,
 	       dtrace_consume_rec_f *rf, void *arg)
 {
 	dtrace_optval_t		interval = dtp->dt_options[DTRACEOPT_SWITCHRATE];
+#if defined(__linux__)
 	struct epoll_event	events[dtp->dt_conf.num_online_cpus];
+#endif
 	int			drained = 0;
 	int			i, cnt;
 	dtrace_workstatus_t	rval;
@@ -2842,6 +2850,7 @@ dtrace_consume(dtrace_hdl_t *dtp, FILE *fp, dtrace_consume_probe_f *pf,
 	if (rf == NULL)
 		rf = (dtrace_consume_rec_f *)dt_nullrec;
 
+#if defined(__linux__)
 	/*
 	 * The epoll_wait() function expects the interval to be expressed in
 	 * milliseconds whereas the switch rate is expressed in nanoseconds.
@@ -2868,9 +2877,25 @@ dtrace_consume(dtrace_hdl_t *dtp, FILE *fp, dtrace_consume_probe_f *pf,
 			events[i].data.ptr = NULL;
 		}
 	}
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, we don't have epoll or perf buffers.
+	 * Instead, we use timer-based polling with direct map reads.
+	 * For now, we use a simple sleep-based approach.
+	 */
+	{
+		struct timespec ts;
+		ts.tv_sec = 0;
+		ts.tv_nsec = (interval * 1000000) / MILLISEC;  /* Convert to ns */
+		if (ts.tv_nsec > 0)
+			nanosleep(&ts, NULL);
+	}
+	cnt = 1;  /* Simulate one CPU worth of data available */
+#endif
 
 	dt_aggregate_clear_option(dtp, DTRACE_A_VALID);
 
+#if defined(__linux__)
 	/*
 	 * If dtp->dt_beganon is not -1, we did not process the BEGIN probe
 	 * data (if any) yet.  We do know (since dtp->dt_active is TRUE) that
@@ -2886,6 +2911,17 @@ dtrace_consume(dtrace_hdl_t *dtp, FILE *fp, dtrace_consume_probe_f *pf,
 		dtp->dt_lastagg = 0;
 		dtp->dt_lastswitch = 0;
 	}
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, BEGIN probe data is handled directly.
+	 * The dt_beganon field is set when BEGIN completes.
+	 */
+	if (dtp->dt_beganon != -1) {
+		dtp->dt_beganon = -1;  /* Mark as processed */
+		dtp->dt_lastagg = 0;
+		dtp->dt_lastswitch = 0;
+	}
+#endif
 
 	/*
 	 * Loop over the buffers that have data available, and process them one
@@ -2893,6 +2929,7 @@ dtrace_consume(dtrace_hdl_t *dtp, FILE *fp, dtrace_consume_probe_f *pf,
 	 * executed because we want to process that one last.
 	 */
 drain:
+#if defined(__linux__)
 	for (i = 0; i < cnt; i++) {
 		dt_peb_t	*peb = events[i].data.ptr;
 
@@ -2905,6 +2942,20 @@ drain:
 		if (rval != 0)
 			return rval;
 	}
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, we poll BPF output maps directly.
+	 * For self-trace mode, we process a single "virtual" CPU.
+	 * The actual data comes from the BPF program execution results
+	 * stored in maps by the rbpf backend.
+	 */
+	(void)i;  /* Suppress unused variable warning */
+	(void)cnt;
+	/* 
+	 * TODO: Implement RedoxOS-specific output consumption from BPF maps.
+	 * For now, output is handled directly by the rbpf backend.
+	 */
+#endif
 
 	/*
 	 * If a commit or discard has come in, loop twice, because if it was a
@@ -2926,6 +2977,7 @@ drain:
 	if (!dtp->dt_stopped)
 		return 0;
 
+#if defined(__linux__)
 	/*
 	 * Tracing has stopped, so we need to process the buffer for the CPU on
 	 * which the END probe executed.
@@ -2940,6 +2992,12 @@ drain:
 
 		return dt_consume_cpu(dtp, fp, peb, pf, rf, 0, arg);
 	}
+#elif defined(__redox__)
+	/*
+	 * On RedoxOS, END probe handling is done directly.
+	 * No per-CPU buffer processing needed in self-trace mode.
+	 */
+#endif
 
 	/*
 	 * If we get here, the END probe fired without any data being recorded

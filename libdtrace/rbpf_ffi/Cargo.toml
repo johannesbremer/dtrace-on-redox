@@ -35,3 +35,7 @@ inherits = "release"
 opt-level = "s"
 lto = true
 panic = "abort"
+
+# Use our patched rbpf for RedoxOS support (getrandom instead of rand)
+[patch.crates-io]
+rbpf = { path = "rbpf-patched" }

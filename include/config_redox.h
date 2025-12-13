@@ -23,8 +23,10 @@
 
 /*
  * Force rbpf backend on RedoxOS
+ * Note: USE_RBPF_BACKEND is a feature flag, distinct from the
+ * DT_BPF_BACKEND_RBPF enum value in dt_bpf_backend.h
  */
-#define DT_BPF_BACKEND_RBPF	1
+#define USE_RBPF_BACKEND	1
 
 /*
  * Disable Linux-specific features

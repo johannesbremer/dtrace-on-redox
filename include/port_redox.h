@@ -20,11 +20,22 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 /*
  * RedoxOS doesn't have these Linux-specific headers
  */
 #define __USE_GNU 1
+
+/*
+ * Time unit definitions (for dt_consume.c, etc.)
+ */
+#ifndef NANOSEC
+#define NANOSEC		1000000000LL
+#endif
+#ifndef MILLISEC
+#define MILLISEC	1000
+#endif
 
 /*
  * hrtime_t - high-resolution time type
@@ -41,6 +52,14 @@ static inline hrtime_t gethrtime(void)
 		return (hrtime_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 	return 0;
 }
+
+/*
+ * processorid_t - CPU identifier type
+ */
+#ifndef _PROCESSORID_T
+#define _PROCESSORID_T
+typedef int processorid_t;
+#endif
 
 /*
  * CPU online check - on RedoxOS, assume single CPU for now
