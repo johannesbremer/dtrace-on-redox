@@ -20,10 +20,19 @@ VERSION := $(shell ./libdtrace/mkvers -vcurrent=t libdtrace/versions.list)
 
 ARCH := $(shell uname -m)
 
+# Check if we're cross-compiling for RedoxOS
+ifdef TARGET
+ifeq ($(findstring redox,$(TARGET)),redox)
+REDOX_BUILD := yes
+endif
+endif
+
+ifndef REDOX_BUILD
 $(if $(subst sparc64,,$(subst aarch64,,$(subst x86_64,,$(ARCH)))), \
     $(error "Error: DTrace for Linux only supports x86_64, ARM64 and sparc64"),)
 $(if $(subst Linux,,$(shell uname -s)), \
-    $(error "Error: DTrace only supports Linux"),)
+    $(error "Error: DTrace only supports Linux. Use TARGET=x86_64-unknown-redox for RedoxOS"),)
+endif
 
 # Variables overridable by the command line and configure scripts.
 
@@ -137,6 +146,7 @@ all::
 $(shell mkdir -p $(objdir))
 
 include Makeoptions
+-include Makeoptions.redox
 include Makefunctions
 include Makeconfig
 

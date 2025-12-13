@@ -1,0 +1,150 @@
+# DTrace for RedoxOS - Recipe Configuration
+#
+# Oracle Linux DTrace - RedoxOS Port
+# Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+# Licensed under the Universal Permissive License v 1.0 as shown at
+# http://oss.oracle.com/licenses/upl.
+#
+# This recipe builds DTrace for RedoxOS using the rbpf user-space
+# eBPF virtual machine. It supports self-tracing only (tracing the
+# dtrace process itself).
+#
+# Supported probes:
+#   - dtrace:::BEGIN, dtrace:::END, dtrace:::ERROR
+#   - profile:::tick-* (timer-based, emulated)
+#
+# Note: Kernel tracing is not supported on RedoxOS.
+
+#TODO work-in-progress, requires testing on RedoxOS
+
+[source]
+git = "https://github.com/oracle/dtrace-utils.git"
+branch = "devel"
+# Use shallow clone for faster downloads
+shallow_clone = true
+
+[build]
+template = "custom"
+dependencies = [
+    # No external C library dependencies for now
+    # We use the rbpf Rust crate which is built from source
+]
+
+script = """
+# Build the rbpf FFI library first
+echo "Building rbpf FFI library for RedoxOS..."
+cd "${COOKBOOK_SOURCE}/libdtrace/rbpf_ffi"
+
+# Build with RedoxOS target, no JIT (mmap restrictions)
+cargo build --release \
+    --target "${TARGET}" \
+    --features no-jit
+
+# Copy the library to a known location
+mkdir -p "${COOKBOOK_BUILD}/lib"
+cp "target/${TARGET}/release/librbpf_ffi.a" "${COOKBOOK_BUILD}/lib/"
+
+cd "${COOKBOOK_BUILD}"
+
+# Set up build environment for cross-compilation
+export CC="${TARGET}-gcc"
+export AR="${TARGET}-ar"
+export RANLIB="${TARGET}-ranlib"
+
+# Compiler flags for RedoxOS
+CFLAGS="-O2 -Wall -D__redox__"
+CFLAGS+=" -DDT_BPF_BACKEND_RBPF"
+CFLAGS+=" -DHAVE_STRLCPY -DHAVE_STRLCAT"
+CFLAGS+=" -DDT_SELF_TRACE_ONLY"
+CFLAGS+=" -DDT_NO_KERNEL_TRACING"
+CFLAGS+=" -I${COOKBOOK_SOURCE}/include"
+
+# Disable kernel-dependent providers
+CFLAGS+=" -DDT_DISABLE_FBT -DDT_DISABLE_SDT"
+CFLAGS+=" -DDT_DISABLE_SYSCALL -DDT_DISABLE_SCHED"
+CFLAGS+=" -DDT_DISABLE_IO -DDT_DISABLE_IP"
+CFLAGS+=" -DDT_DISABLE_TCP -DDT_DISABLE_UDP"
+CFLAGS+=" -DDT_DISABLE_PROC -DDT_DISABLE_LOCKSTAT"
+CFLAGS+=" -DDT_DISABLE_CPC -DDT_DISABLE_RAWTP"
+
+export CFLAGS
+
+# Linker flags
+LDFLAGS="-L${COOKBOOK_BUILD}/lib -static"
+export LDFLAGS
+
+LDLIBS="-lrbpf_ffi -lm -ldl"
+export LDLIBS
+
+# Copy source to build directory (read-only source)
+rsync -a --exclude='.git' "${COOKBOOK_SOURCE}/" "${COOKBOOK_BUILD}/src/"
+cd "${COOKBOOK_BUILD}/src"
+
+# For now, build a minimal version with just the core components
+# This is a simplified build for the initial port
+
+echo "Compiling DTrace core components..."
+
+# Create object directory
+mkdir -p "${COOKBOOK_BUILD}/obj"
+
+# Compile the rbpf backend
+${CC} ${CFLAGS} -c libdtrace/dt_bpf_backend.c -o "${COOKBOOK_BUILD}/obj/dt_bpf_backend.o"
+${CC} ${CFLAGS} -c libdtrace/dt_bpf_backend_rbpf.c -o "${COOKBOOK_BUILD}/obj/dt_bpf_backend_rbpf.o"
+${CC} ${CFLAGS} -c libdtrace/dt_bpf_helpers_rbpf.c -o "${COOKBOOK_BUILD}/obj/dt_bpf_helpers_rbpf.o"
+
+# Compile RedoxOS-specific code
+${CC} ${CFLAGS} -c libdtrace/dt_prov_redox.c -o "${COOKBOOK_BUILD}/obj/dt_prov_redox.o"
+${CC} ${CFLAGS} -c libport/port_redox.c -o "${COOKBOOK_BUILD}/obj/port_redox.o"
+
+# Compile the minimal dtrace command for RedoxOS
+echo "Compiling dtrace command..."
+${CC} ${CFLAGS} -c cmd/dtrace_redox.c -o "${COOKBOOK_BUILD}/obj/dtrace_redox.o"
+
+# Link the dtrace binary
+echo "Linking dtrace binary..."
+${CC} ${LDFLAGS} \
+    "${COOKBOOK_BUILD}/obj/dtrace_redox.o" \
+    "${COOKBOOK_BUILD}/obj/dt_bpf_backend.o" \
+    "${COOKBOOK_BUILD}/obj/dt_bpf_backend_rbpf.o" \
+    "${COOKBOOK_BUILD}/obj/dt_bpf_helpers_rbpf.o" \
+    "${COOKBOOK_BUILD}/obj/dt_prov_redox.o" \
+    "${COOKBOOK_BUILD}/obj/port_redox.o" \
+    ${LDLIBS} \
+    -o "${COOKBOOK_BUILD}/dtrace"
+
+echo "Build completed. Packaging..."
+
+# Install the binary
+mkdir -pv "${COOKBOOK_STAGE}/usr/bin"
+mkdir -pv "${COOKBOOK_STAGE}/usr/lib"
+mkdir -pv "${COOKBOOK_STAGE}/usr/include/dtrace"
+mkdir -pv "${COOKBOOK_STAGE}/usr/share/doc/dtrace"
+
+# Install dtrace binary
+cp -v "${COOKBOOK_BUILD}/dtrace" "${COOKBOOK_STAGE}/usr/bin/"
+chmod +x "${COOKBOOK_STAGE}/usr/bin/dtrace"
+
+# Install headers
+cp -v include/dt_bpf_backend.h "${COOKBOOK_STAGE}/usr/include/dtrace/"
+cp -v include/rbpf_ffi.h "${COOKBOOK_STAGE}/usr/include/dtrace/" 2>/dev/null || true
+cp -v include/config_redox.h "${COOKBOOK_STAGE}/usr/include/dtrace/"
+cp -v include/port_redox.h "${COOKBOOK_STAGE}/usr/include/dtrace/"
+
+# Install library
+cp -v "${COOKBOOK_BUILD}/lib/librbpf_ffi.a" "${COOKBOOK_STAGE}/usr/lib/"
+
+# Install documentation
+cp -v doc/PORTING-RBPF.md "${COOKBOOK_STAGE}/usr/share/doc/dtrace/"
+cp -v doc/REDOX-PORT.md "${COOKBOOK_STAGE}/usr/share/doc/dtrace/"
+cp -v LICENSE "${COOKBOOK_STAGE}/usr/share/doc/dtrace/"
+cp -v README.md "${COOKBOOK_STAGE}/usr/share/doc/dtrace/"
+
+echo "DTrace for RedoxOS packaging complete!"
+"""
+
+[package]
+dependencies = [
+    # Runtime dependencies
+    # None for now - self-contained
+]

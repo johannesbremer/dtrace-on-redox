@@ -9,6 +9,11 @@
  * This file provides user-space implementations of common BPF helper
  * functions for the rbpf backend. These emulate kernel BPF helpers
  * in user-space to enable DTrace to run on non-Linux systems.
+ *
+ * Platform support:
+ *   - Linux: Full emulation
+ *   - RedoxOS: Adapted for relibc and Redox syscalls
+ *   - Other Unix: POSIX-compliant implementation
  */
 
 #include <errno.h>
@@ -17,6 +22,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/types.h>
+
+#ifdef __redox__
+#include "config_redox.h"
+#endif
 
 #include <dt_bpf_backend.h>
 

@@ -1,0 +1,103 @@
+# RedoxOS Build Configuration for DTrace
+#
+# Oracle Linux DTrace - RedoxOS Port
+# Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+# Licensed under the Universal Permissive License v 1.0 as shown at
+# http://oss.oracle.com/licenses/upl.
+#
+# This Makefile fragment provides RedoxOS-specific build configuration.
+# It should be included when building DTrace for RedoxOS.
+
+# Detect if we're building for RedoxOS
+ifeq ($(TARGET),x86_64-unknown-redox)
+REDOX_BUILD := yes
+endif
+
+ifdef REDOX_BUILD
+
+# Force rbpf backend
+rbpf_backend := yes
+
+# RedoxOS uses relibc
+LIBC := relibc
+
+# No systemd on RedoxOS
+WITH_SYSTEMD := n
+
+# Compiler flags for RedoxOS
+REDOX_CFLAGS := -D__redox__ -DDT_BPF_BACKEND_RBPF
+REDOX_CFLAGS += -DHAVE_STRLCPY -DHAVE_STRLCAT
+REDOX_CFLAGS += -DDT_SELF_TRACE_ONLY -DDT_NO_KERNEL_TRACING
+REDOX_CFLAGS += -I$(CURDIR)/include
+
+# Disable features that require kernel support
+REDOX_CFLAGS += -DDT_DISABLE_FBT -DDT_DISABLE_SDT
+REDOX_CFLAGS += -DDT_DISABLE_SYSCALL -DDT_DISABLE_SCHED
+REDOX_CFLAGS += -DDT_DISABLE_IO -DDT_DISABLE_IP
+REDOX_CFLAGS += -DDT_DISABLE_TCP -DDT_DISABLE_UDP
+REDOX_CFLAGS += -DDT_DISABLE_PROC -DDT_DISABLE_LOCKSTAT
+REDOX_CFLAGS += -DDT_DISABLE_CPC -DDT_DISABLE_RAWTP
+
+override CFLAGS += $(REDOX_CFLAGS)
+
+# Linker flags for RedoxOS
+REDOX_LDFLAGS := -L$(objdir)/libdtrace/rbpf_ffi/target/x86_64-unknown-redox/release
+REDOX_LDFLAGS += -static
+
+override LDFLAGS += $(REDOX_LDFLAGS)
+
+# Link against rbpf FFI
+override LDLIBS += -lrbpf_ffi
+
+# Cross-compilation settings
+CC := x86_64-unknown-redox-gcc
+AR := x86_64-unknown-redox-ar
+LD := x86_64-unknown-redox-ld
+RANLIB := x86_64-unknown-redox-ranlib
+
+# Cargo target for rbpf FFI
+CARGO_TARGET := x86_64-unknown-redox
+CARGO_FLAGS := --target $(CARGO_TARGET) --release --features no-jit
+
+# Sources to exclude for RedoxOS (Linux-specific)
+REDOX_EXCLUDE_SRCS := \
+	dt_prov_fbt.c \
+	dt_prov_sdt.c \
+	dt_prov_syscall.c \
+	dt_prov_sched.c \
+	dt_prov_io.c \
+	dt_prov_ip.c \
+	dt_prov_tcp.c \
+	dt_prov_udp.c \
+	dt_prov_proc.c \
+	dt_prov_lockstat.c \
+	dt_prov_cpc.c \
+	dt_prov_rawtp.c \
+	dt_bpf_backend_linux.c \
+	dt_btf.c
+
+# RedoxOS-specific sources to include
+REDOX_INCLUDE_SRCS := \
+	dt_prov_redox.c \
+	port_redox.c
+
+# Build the rbpf FFI library for RedoxOS
+.PHONY: rbpf-ffi-redox
+rbpf-ffi-redox:
+	cd libdtrace/rbpf_ffi && cargo build $(CARGO_FLAGS)
+
+# Target to build DTrace for RedoxOS
+.PHONY: dtrace-redox
+dtrace-redox: rbpf-ffi-redox
+	$(MAKE) all TARGET=$(CARGO_TARGET)
+
+endif # REDOX_BUILD
+
+# Help text for RedoxOS build
+help-redox::
+	@printf "\nRedoxOS Build:\n\n" >&2
+	@printf "make dtrace-redox\t\tBuild DTrace for RedoxOS (x86_64)\n" >&2
+	@printf "make rbpf-ffi-redox\t\tBuild rbpf FFI library for RedoxOS\n" >&2
+	@printf "make TARGET=x86_64-unknown-redox [targets]\tCross-compile for RedoxOS\n\n" >&2
+
+help:: help-redox

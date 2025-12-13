@@ -106,4 +106,12 @@ pid_t gettid(void);
 #define ENOTSUPP		524	/* Operation is not supported */
 #endif
 
+/*
+ * RedoxOS-specific portability layer
+ */
+#ifdef __redox__
+#include "port_redox.h"
+#include "config_redox.h"
+#endif
+
 #endif

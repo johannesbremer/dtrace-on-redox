@@ -4,6 +4,11 @@
 //! user-space eBPF virtual machine, allowing DTrace to execute BPF
 //! programs without relying on Linux kernel BPF syscalls.
 //!
+//! Platform support:
+//!   - Linux: Full support including JIT
+//!   - RedoxOS: Interpreter only (no JIT due to mmap restrictions)
+//!   - Other Unix: Interpreter only
+//!
 //! Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
 //! Licensed under the Universal Permissive License v 1.0 as shown at
 //! http://oss.oracle.com/licenses/upl.
@@ -19,6 +24,7 @@ use rbpf::EbpfVmRaw;
 type HelperFn = fn(u64, u64, u64, u64, u64) -> u64;
 
 /// Wrapper around rbpf VM with helper storage
+#[allow(dead_code)]
 struct RbpfVmWrapper {
     vm: EbpfVmRaw<'static>,
     program: Vec<u8>,
@@ -140,8 +146,11 @@ pub unsafe extern "C" fn rbpf_vm_exec(
 ///
 /// # Safety
 /// The caller must ensure that `vm` is a valid pointer returned by `rbpf_vm_new`.
+///
+/// Note: JIT compilation is not available on RedoxOS due to mmap restrictions.
+/// On RedoxOS, this function always returns -1 and the interpreter is used instead.
 #[no_mangle]
-#[cfg(all(not(windows), feature = "std"))]
+#[cfg(all(not(windows), not(target_os = "redox"), feature = "std", not(feature = "no-jit")))]
 pub unsafe extern "C" fn rbpf_vm_jit_compile(vm: *mut c_void) -> i32 {
     if vm.is_null() {
         return -1;
@@ -158,9 +167,9 @@ pub unsafe extern "C" fn rbpf_vm_jit_compile(vm: *mut c_void) -> i32 {
     }
 }
 
-/// JIT compile stub for platforms that don't support JIT
+/// JIT compile stub for platforms that don't support JIT (Windows, RedoxOS, no-std)
 #[no_mangle]
-#[cfg(any(windows, not(feature = "std")))]
+#[cfg(any(windows, target_os = "redox", not(feature = "std"), feature = "no-jit"))]
 pub unsafe extern "C" fn rbpf_vm_jit_compile(_vm: *mut c_void) -> i32 {
     -1 // JIT not supported on this platform
 }
@@ -173,7 +182,7 @@ pub unsafe extern "C" fn rbpf_vm_jit_compile(_vm: *mut c_void) -> i32 {
 /// - The program has been JIT-compiled with `rbpf_vm_jit_compile`
 /// - `mem` points to valid memory of at least `mem_len` bytes
 #[no_mangle]
-#[cfg(all(not(windows), feature = "std"))]
+#[cfg(all(not(windows), not(target_os = "redox"), feature = "std", not(feature = "no-jit")))]
 pub unsafe extern "C" fn rbpf_vm_exec_jit(
     vm: *mut c_void,
     mem: *const u8,
@@ -201,9 +210,9 @@ pub unsafe extern "C" fn rbpf_vm_exec_jit(
     }
 }
 
-/// JIT execution stub for platforms that don't support JIT
+/// JIT execution stub for platforms that don't support JIT (Windows, RedoxOS, no-std)
 #[no_mangle]
-#[cfg(any(windows, not(feature = "std")))]
+#[cfg(any(windows, target_os = "redox", not(feature = "std"), feature = "no-jit"))]
 pub unsafe extern "C" fn rbpf_vm_exec_jit(
     _vm: *mut c_void,
     _mem: *const u8,
