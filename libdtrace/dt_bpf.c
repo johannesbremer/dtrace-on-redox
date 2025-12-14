@@ -157,7 +157,7 @@ dt_bpf_prog_attach(enum bpf_prog_type ptype, enum bpf_attach_type atype,
  * Non-Linux: load BPF program through backend abstraction.
  */
 int
-dt_bpf_prog_attach(int ptype, int atype,
+dt_bpf_prog_attach(enum bpf_prog_type ptype, enum bpf_attach_type atype,
 		   int btf_fd, uint32_t btf_id, const dtrace_difo_t *dp,
 		   uint32_t log_level, char *log_buf, size_t log_buf_sz)
 {
@@ -248,7 +248,7 @@ dt_bpf_btf_get_next_id(uint32_t curr, uint32_t *next)
  * Non-Linux: BTF operations through backend abstraction.
  */
 int
-dt_bpf_btf_get_info_by_fd(int fd, void *info, uint32_t *size)
+dt_bpf_btf_get_info_by_fd(int fd, btf_info_t *info, uint32_t *size)
 {
 	return dt_bpf_backend->btf_get_info_by_fd(fd, info, size);
 }

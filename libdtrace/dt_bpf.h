@@ -64,8 +64,13 @@ extern "C" {
 #define DT_BPF_LOG_SIZE_DEFAULT	(UINT32_MAX >> 8)
 #define DT_BPF_LOG_SIZE_SMALL	4096
 
+#ifdef __linux__
 extern int dt_perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu,
 			      int group_fd, unsigned long flags);
+#else
+extern int dt_perf_event_open(void *attr, pid_t pid, int cpu,
+			      int group_fd, unsigned long flags);
+#endif
 extern int dt_bpf(enum bpf_cmd cmd, union bpf_attr *attr);
 
 extern int dt_attach_error(struct dtrace_hdl *, int, ...);

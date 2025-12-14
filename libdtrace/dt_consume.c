@@ -24,13 +24,12 @@
 #include <dt_string.h>
 #include <libproc.h>
 #include <port.h>
-#if defined(__linux__)
 #include <sys/epoll.h>
+#if defined(__linux__)
 #include <sys/eventfd.h>
 #include <linux/perf_event.h>
 #endif
 #ifdef __redox__
-#include <config_redox.h>
 #include <dt_bpf_backend.h>
 #endif
 

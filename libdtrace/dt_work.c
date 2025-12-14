@@ -19,7 +19,6 @@
 #include <valgrind/valgrind.h>
 #endif
 #ifdef __redox__
-#include <config_redox.h>
 #include <dt_bpf_backend.h>
 #endif
 #include <dt_impl.h>

@@ -18,10 +18,8 @@
 #include <unistd.h>
 #include <fnmatch.h>
 
-#ifdef __redox__
-
 #include <sys/compiler.h>
-#include "port_redox.h"
+#include <port.h>
 
 /*
  * strlcpy - copy string with size limit
@@ -57,13 +55,8 @@ strlcat(char *dst, const char *src, size_t size)
 #endif
 
 /*
- * gmatch - glob pattern matching using fnmatch
+ * gmatch is provided by gmatch.c - do not define here to avoid multiple definitions
  */
-int
-gmatch(const char *s, const char *p)
-{
-	return fnmatch(p, s, 0) == 0;
-}
 
 /*
  * daemon_perr - log error and exit
@@ -91,4 +84,3 @@ daemon_log(int fd, const char *fmt, ...)
 	fprintf(stderr, "\n");
 }
 
-#endif /* __redox__ */

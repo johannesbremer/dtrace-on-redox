@@ -15,6 +15,13 @@
 #ifndef	_LIBPROC_H
 #define	_LIBPROC_H
 
+/*
+ * RedoxOS: Use minimal stub header instead of full libproc
+ */
+#ifdef __redox__
+#include "libproc_redox.h"
+#else
+
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -340,5 +347,7 @@ rd_agent_t *Prd_agent(struct ps_prochandle *);
 #ifdef	__cplusplus
 }
 #endif
+
+#endif /* !__redox__ */
 
 #endif	/* _LIBPROC_H */

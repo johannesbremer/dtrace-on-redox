@@ -26,24 +26,13 @@
 /*
  * List of provider modules that register providers and probes.  A single
  * provider module may create multiple providers.
+ *
+ * RedoxOS only supports user-space providers (dtrace and profile).
+ * Kernel providers are not available.
  */
 const dt_provimpl_t *dt_providers[] = {
-	&dt_dtrace,		/* list dt_dtrace first */
-	&dt_cpc,
-	&dt_fbt,
-	&dt_io,
-	&dt_ip,
-	&dt_lockstat,
-	&dt_proc,
-	&dt_profile,
-	&dt_rawtp,
-	&dt_sched,
-	&dt_sdt,
-	&dt_syscall,
-	&dt_tcp,
-	&dt_udp,
-	&dt_uprobe,
-	&dt_usdt,
+	&dt_dtrace,		/* BEGIN, END, ERROR */
+	&dt_profile,		/* profile-*, tick-* */
 	NULL
 };
 

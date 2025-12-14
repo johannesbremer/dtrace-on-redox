@@ -23,10 +23,6 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-#ifdef __redox__
-#include "config_redox.h"
-#endif
-
 #include <dt_bpf_backend.h>
 
 /*
