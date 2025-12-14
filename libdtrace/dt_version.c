@@ -74,6 +74,16 @@ dt_str2kver(const char *kverstr, dt_version_t *vp)
 	int	kv1, kv2, kv3;
 	int	rval;
 
+#ifdef __redox__
+	/*
+	 * Redox doesn't use Linux kernel version strings.
+	 * Return a synthetic version (1.0.0) for compatibility.
+	 */
+	(void)kverstr;
+	if (vp)
+		*vp = DT_VERSION_NUMBER(1, 0, 0);
+	return 0;
+#else
 	rval = sscanf(kverstr, "%d.%d.%d", &kv1, &kv2, &kv3);
 
 	switch (rval) {
@@ -90,4 +100,5 @@ dt_str2kver(const char *kverstr, dt_version_t *vp)
 		*vp = DT_VERSION_NUMBER(kv1, kv2, kv3);
 
 	return 0;
+#endif
 }

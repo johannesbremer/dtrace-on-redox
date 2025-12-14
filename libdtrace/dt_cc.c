@@ -685,7 +685,6 @@ dt_compile(dtrace_hdl_t *dtp, int context, dtrace_probespec_t pspec, void *arg,
 
 		xyerror(D_EMPTY, "empty D program translation unit\n");
 	}
-
 	yybegin(YYS_DONE);
 
 	if (yypcb->pcb_string)

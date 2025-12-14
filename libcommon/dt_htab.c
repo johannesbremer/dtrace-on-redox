@@ -320,6 +320,12 @@ dt_htab_next(const dt_htab_t *htab, dt_htab_next_t **it)
 	void *ret;
 
 	/*
+	 * Handle NULL htab - return immediately with no iteration.
+	 */
+	if (!htab)
+		return NULL;
+
+	/*
 	 * Start of iteration.
 	 */
 	if (!i) {

@@ -4,8 +4,8 @@
  * Licensed under the Universal Permissive License v 1.0 as shown at
  * http://oss.oracle.com/licenses/upl.
  *
- * CTF (Compact C Type Format) API stubs for RedoxOS
- * CTF is not available on RedoxOS, so we provide minimal stubs.
+ * CTF (Compact C Type Format) API for RedoxOS
+ * This provides a minimal working type system for DTrace on Redox.
  */
 
 #ifndef _SYS_CTF_API_H
@@ -13,15 +13,40 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
+#ifdef __redox__
+#include <stdio.h>
+#endif
 
-/* CTF file handle - opaque pointer */
-typedef struct ctf_file ctf_file_t;
-typedef struct ctf_file ctf_dict_t;
-typedef struct ctf_archive ctf_archive_t;
-
+/*
+ * Minimal CTF implementation for Redox.
+ * Instead of stubs that return errors, we provide a simple
+ * type table that can hold the basic types DTrace needs.
+ */
 /* CTF type and member IDs */
 typedef uint32_t ctf_id_t;
+
+/* Maximum types in our simple implementation */
+#define CTF_REDOX_MAX_TYPES 256
+
+/* CTF file handle - contains our type table */
+typedef struct ctf_file {
+	int model;
+	void *specific;
+	struct ctf_file *parent;
+	ctf_id_t next_id;
+	struct {
+		char name[64];
+		int kind;
+		ctf_id_t ref;
+		size_t size;
+	} types[CTF_REDOX_MAX_TYPES];
+} ctf_file_t;
+
+typedef ctf_file_t ctf_dict_t;
+typedef struct ctf_archive ctf_archive_t;
 
 /* CTF encoding structure for integers and floats */
 typedef struct ctf_encoding {
@@ -66,8 +91,6 @@ typedef struct ctf_membinfo {
 #define CTF_INT_CHAR      0x02
 #define CTF_INT_BOOL      0x04
 #define CTF_INT_VARARGS   0x08
-
-/* CTF char encoding - use same value as CTF_INT_CHAR for compat */
 #define CTF_CHAR          CTF_INT_CHAR
 
 /* CTF float encoding types */
@@ -120,7 +143,364 @@ typedef struct ctf_membinfo {
 #define CTF_ADD_NONROOT   0
 #define CTF_ADD_ROOT      1
 
-/* Stub functions - all return failure or NULL */
+/* === Implementation functions === */
+
+static inline ctf_file_t *ctf_create(int *errp)
+{
+	ctf_file_t *fp = calloc(1, sizeof(ctf_file_t));
+	if (fp == NULL) {
+		if (errp) *errp = ECTF_NOTFOUND;
+		return NULL;
+	}
+	fp->model = CTF_MODEL_LP64;
+	fp->next_id = 1; /* Start from 1, 0 is invalid */
+	if (errp) *errp = 0;
+	return fp;
+}
+
+static inline void ctf_close(ctf_file_t *fp)
+{
+	if (fp) free(fp);
+}
+
+static inline int ctf_setmodel(ctf_file_t *fp, int model)
+{
+	if (fp) fp->model = model;
+	return 0;
+}
+
+static inline int ctf_getmodel(ctf_file_t *fp)
+{
+	return fp ? fp->model : CTF_MODEL_LP64;
+}
+
+static inline void ctf_setspecific(ctf_file_t *fp, void *data)
+{
+	if (fp) fp->specific = data;
+}
+
+static inline void *ctf_getspecific(ctf_file_t *fp)
+{
+	return fp ? fp->specific : NULL;
+}
+
+static inline int ctf_import(ctf_file_t *fp, ctf_file_t *pfp)
+{
+	ctf_id_t i;
+	if (!fp || !pfp)
+		return 0;
+	
+	/*
+	 * Copy all types from parent to child so type IDs are consistent.
+	 * This is simpler than proper parent lookup and works for our use case.
+	 */
+	for (i = 1; i < pfp->next_id && i < CTF_REDOX_MAX_TYPES; i++) {
+		memcpy(&fp->types[i], &pfp->types[i], sizeof(fp->types[i]));
+	}
+	fp->next_id = pfp->next_id;
+	fp->parent = pfp; /* Keep parent pointer for reference */
+	
+	return 0;
+}
+
+static inline ctf_file_t *ctf_parent_file(ctf_file_t *fp)
+{
+	return fp ? fp->parent : NULL;
+}
+
+static inline const char *ctf_parent_name(ctf_file_t *fp)
+{
+	(void)fp;
+	return NULL;
+}
+static inline ctf_id_t ctf_add_integer(ctf_file_t *fp, uint32_t flags,
+    const char *name, const ctf_encoding_t *ep)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	strncpy(fp->types[id].name, name ? name : "", 63);
+	fp->types[id].name[63] = '\0';
+	fp->types[id].kind = CTF_K_INTEGER;
+	fp->types[id].size = ep ? (ep->cte_bits / 8) : 4;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_float(ctf_file_t *fp, uint32_t flags,
+    const char *name, const ctf_encoding_t *ep)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	strncpy(fp->types[id].name, name ? name : "", 63);
+	fp->types[id].name[63] = '\0';
+	fp->types[id].kind = CTF_K_FLOAT;
+	fp->types[id].size = ep ? (ep->cte_bits / 8) : 8;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_pointer(ctf_file_t *fp, uint32_t flags,
+    ctf_id_t ref)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	fp->types[id].name[0] = '\0';
+	fp->types[id].kind = CTF_K_POINTER;
+	fp->types[id].ref = ref;
+	fp->types[id].size = 8;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_typedef(ctf_file_t *fp, uint32_t flags,
+    const char *name, ctf_id_t ref)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	strncpy(fp->types[id].name, name ? name : "", 63);
+	fp->types[id].name[63] = '\0';
+	fp->types[id].kind = CTF_K_TYPEDEF;
+	fp->types[id].ref = ref;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_struct(ctf_file_t *fp, uint32_t flags,
+    const char *name)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	strncpy(fp->types[id].name, name ? name : "", 63);
+	fp->types[id].name[63] = '\0';
+	fp->types[id].kind = CTF_K_STRUCT;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_union(ctf_file_t *fp, uint32_t flags,
+    const char *name)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	strncpy(fp->types[id].name, name ? name : "", 63);
+	fp->types[id].name[63] = '\0';
+	fp->types[id].kind = CTF_K_UNION;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_enum(ctf_file_t *fp, uint32_t flags,
+    const char *name)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	strncpy(fp->types[id].name, name ? name : "", 63);
+	fp->types[id].name[63] = '\0';
+	fp->types[id].kind = CTF_K_ENUM;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_array(ctf_file_t *fp, uint32_t flags,
+    const ctf_arinfo_t *arp)
+{
+	ctf_id_t id;
+	(void)flags;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	fp->types[id].name[0] = '\0';
+	fp->types[id].kind = CTF_K_ARRAY;
+	if (arp) fp->types[id].ref = arp->ctr_contents;
+	return id;
+}
+
+static inline ctf_id_t ctf_add_function(ctf_file_t *fp, uint32_t flags,
+    const ctf_funcinfo_t *fi, const ctf_id_t *args)
+{
+	ctf_id_t id;
+	(void)flags; (void)fi; (void)args;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	fp->types[id].name[0] = '\0';
+	fp->types[id].kind = CTF_K_FUNCTION;
+	return id;
+}
+
+static inline int ctf_add_member(ctf_file_t *fp, ctf_id_t type,
+    const char *name, ctf_id_t memb)
+{
+	(void)fp; (void)type; (void)name; (void)memb;
+	return 0; /* Success - we don't track members */
+}
+
+static inline int ctf_add_enumerator(ctf_file_t *fp, ctf_id_t type,
+    const char *name, int val)
+{
+	(void)fp; (void)type; (void)name; (void)val;
+	return 0;
+}
+
+static inline int ctf_update(ctf_file_t *fp)
+{
+	(void)fp;
+	return 0;
+}
+
+static inline ctf_id_t ctf_lookup_by_name(ctf_file_t *fp, const char *name)
+{
+	ctf_id_t i;
+	size_t name_len;
+	
+	if (!fp || !name)
+		return CTF_ERR;
+	if ((unsigned long)fp < 0x1000)
+		return CTF_ERR;
+	if (fp->next_id > CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	
+	name_len = strlen(name);
+	
+	/* Trim trailing whitespace from search name */
+	while (name_len > 0 && (name[name_len - 1] == ' ' || 
+	       name[name_len - 1] == '\t' || name[name_len - 1] == '\n'))
+		name_len--;
+	
+	/* 
+	 * Search in current file. Types from parent are copied during import,
+	 * so all types should be available locally.
+	 */
+	for (i = 1; i < fp->next_id; i++) {
+		/* Manual comparison to avoid relibc strcmp issues */
+		const char *tname = fp->types[i].name;
+		size_t tlen = strlen(tname);
+		
+		if (tlen == name_len && memcmp(tname, name, name_len) == 0)
+			return i;
+	}
+	return CTF_ERR;
+}
+
+static inline int ctf_type_kind(ctf_file_t *fp, ctf_id_t type)
+{
+	if (!fp || type == 0 || type >= CTF_REDOX_MAX_TYPES)
+		return CTF_K_UNKNOWN;
+	return fp->types[type].kind;
+}
+
+static inline ctf_id_t ctf_type_reference(ctf_file_t *fp, ctf_id_t type)
+{
+	int kind;
+	if (!fp || type == 0 || type >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	
+	/* Only pointer, typedef, array, volatile, const, restrict have refs */
+	kind = fp->types[type].kind;
+	if (kind != CTF_K_POINTER && kind != CTF_K_TYPEDEF &&
+	    kind != CTF_K_ARRAY && kind != CTF_K_VOLATILE &&
+	    kind != CTF_K_CONST && kind != CTF_K_RESTRICT)
+		return CTF_ERR;
+	
+	/* Return CTF_ERR if ref is not set (0) */
+	if (fp->types[type].ref == 0)
+		return CTF_ERR;
+	
+	return fp->types[type].ref;
+}
+
+static inline ctf_id_t ctf_type_resolve(ctf_file_t *fp, ctf_id_t type)
+{
+	int kind;
+	int depth = 0;
+	const int max_depth = 100; /* Prevent infinite loops */
+	
+	while (fp && type != 0 && type < CTF_REDOX_MAX_TYPES && depth < max_depth) {
+		kind = fp->types[type].kind;
+		if (kind == CTF_K_TYPEDEF && fp->types[type].ref != 0 && 
+		    fp->types[type].ref != type) {
+			type = fp->types[type].ref;
+			depth++;
+		} else {
+			break;
+		}
+	}
+	return type;
+}
+
+static inline char *ctf_type_name(ctf_file_t *fp, ctf_id_t type,
+    char *buf, size_t len)
+{
+	if (!fp || !buf || len == 0 || type == 0 || type >= CTF_REDOX_MAX_TYPES)
+		return NULL;
+	strncpy(buf, fp->types[type].name, len - 1);
+	buf[len - 1] = '\0';
+	return buf;
+}
+
+static inline ssize_t ctf_type_size(ctf_file_t *fp, ctf_id_t type)
+{
+	if (!fp || type == 0 || type >= CTF_REDOX_MAX_TYPES)
+		return -1;
+	if (fp->types[type].kind == CTF_K_TYPEDEF)
+		return ctf_type_size(fp, fp->types[type].ref);
+	return (ssize_t)fp->types[type].size;
+}
+
+static inline ssize_t ctf_type_align(ctf_file_t *fp, ctf_id_t type)
+{
+	ssize_t sz = ctf_type_size(fp, type);
+	if (sz <= 0) return 1;
+	if (sz > 8) return 8;
+	return sz;
+}
+
+static inline int ctf_type_encoding(ctf_file_t *fp, ctf_id_t type,
+    ctf_encoding_t *ep)
+{
+	ctf_id_t resolved;
+	
+	if (!fp || !ep || type == 0 || type >= CTF_REDOX_MAX_TYPES)
+		return -1;
+	
+	/* Resolve through typedefs to get the actual base type's encoding */
+	resolved = ctf_type_resolve(fp, type);
+	if (resolved == 0 || resolved >= CTF_REDOX_MAX_TYPES)
+		resolved = type;
+	
+	ep->cte_format = 0;
+	ep->cte_offset = 0;
+	ep->cte_bits = (uint32_t)(fp->types[resolved].size * 8);
+	return 0;
+}
+
+static inline const char *ctf_errmsg(int err)
+{
+	(void)err;
+	return "CTF error";
+}
+
+static inline int ctf_errno(ctf_file_t *fp)
+{
+	(void)fp;
+	return 0;
+}
+
+/* Functions that are not needed - return success/no-op */
 static inline ctf_file_t *ctf_open(const char *filename, int *errp)
 {
 	(void)filename;
@@ -134,97 +514,6 @@ static inline ctf_file_t *ctf_bufopen(const ctf_sect_t *ctfsect,
 	(void)ctfsect; (void)symsect; (void)strsect;
 	if (errp) *errp = ECTF_NOTFOUND;
 	return NULL;
-}
-
-static inline void ctf_close(ctf_file_t *fp)
-{
-	(void)fp;
-}
-
-static inline ctf_file_t *ctf_create(int *errp)
-{
-	if (errp) *errp = ECTF_NOTFOUND;
-	return NULL;
-}
-
-static inline int ctf_setmodel(ctf_file_t *fp, int model)
-{
-	(void)fp; (void)model;
-	return -1;
-}
-
-static inline void ctf_setspecific(ctf_file_t *fp, void *data)
-{
-	(void)fp; (void)data;
-}
-
-static inline void *ctf_getspecific(ctf_file_t *fp)
-{
-	(void)fp;
-	return NULL;
-}
-
-static inline int ctf_import(ctf_file_t *fp, ctf_file_t *pfp)
-{
-	(void)fp; (void)pfp;
-	return -1;
-}
-
-static inline ctf_id_t ctf_add_function(ctf_file_t *fp, uint32_t flags,
-    const ctf_funcinfo_t *fi, const ctf_id_t *args)
-{
-	(void)fp; (void)flags; (void)fi; (void)args;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_lookup_by_name(ctf_file_t *fp, const char *name)
-{
-	(void)fp; (void)name;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_type_reference(ctf_file_t *fp, ctf_id_t type)
-{
-	(void)fp; (void)type;
-	return CTF_ERR;
-}
-
-static inline int ctf_type_kind(ctf_file_t *fp, ctf_id_t type)
-{
-	(void)fp; (void)type;
-	return CTF_K_UNKNOWN;
-}
-
-static inline ctf_id_t ctf_type_resolve(ctf_file_t *fp, ctf_id_t type)
-{
-	(void)fp; (void)type;
-	return type;
-}
-
-static inline char *ctf_type_name(ctf_file_t *fp, ctf_id_t type,
-    char *buf, size_t len)
-{
-	(void)fp; (void)type; (void)buf; (void)len;
-	return NULL;
-}
-
-static inline int ctf_type_encoding(ctf_file_t *fp, ctf_id_t type,
-    ctf_encoding_t *ep)
-{
-	(void)fp; (void)type; (void)ep;
-	return -1;
-}
-
-static inline ssize_t ctf_type_size(ctf_file_t *fp, ctf_id_t type)
-{
-	(void)fp; (void)type;
-	return -1;
-}
-
-static inline ssize_t ctf_type_align(ctf_file_t *fp, ctf_id_t type)
-{
-	(void)fp; (void)type;
-	return -1;
 }
 
 static inline int ctf_member_info(ctf_file_t *fp, ctf_id_t type,
@@ -252,30 +541,6 @@ static inline int ctf_func_args(ctf_file_t *fp, unsigned long idx,
 {
 	(void)fp; (void)idx; (void)argc; (void)args;
 	return -1;
-}
-
-static inline const char *ctf_errmsg(int err)
-{
-	(void)err;
-	return "CTF not supported on Redox";
-}
-
-static inline int ctf_errno(ctf_file_t *fp)
-{
-	(void)fp;
-	return ECTF_NOTFOUND;
-}
-
-static inline ctf_file_t *ctf_parent_file(ctf_file_t *fp)
-{
-	(void)fp;
-	return NULL;
-}
-
-static inline const char *ctf_parent_name(ctf_file_t *fp)
-{
-	(void)fp;
-	return NULL;
 }
 
 static inline int ctf_type_iter(ctf_file_t *fp, int (*func)(ctf_id_t, void *), void *arg)
@@ -325,118 +590,36 @@ static inline int ctf_arc_iter(ctf_archive_t *arc,
 	return 0;
 }
 
-static inline ctf_id_t ctf_add_integer(ctf_file_t *fp, uint32_t flags,
-    const char *name, const ctf_encoding_t *ep)
-{
-	(void)fp; (void)flags; (void)name; (void)ep;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_add_float(ctf_file_t *fp, uint32_t flags,
-    const char *name, const ctf_encoding_t *ep)
-{
-	(void)fp; (void)flags; (void)name; (void)ep;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_add_pointer(ctf_file_t *fp, uint32_t flags,
-    ctf_id_t ref)
-{
-	(void)fp; (void)flags; (void)ref;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_add_typedef(ctf_file_t *fp, uint32_t flags,
-    const char *name, ctf_id_t ref)
-{
-	(void)fp; (void)flags; (void)name; (void)ref;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_add_struct(ctf_file_t *fp, uint32_t flags,
-    const char *name)
-{
-	(void)fp; (void)flags; (void)name;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_add_union(ctf_file_t *fp, uint32_t flags,
-    const char *name)
-{
-	(void)fp; (void)flags; (void)name;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_add_enum(ctf_file_t *fp, uint32_t flags,
-    const char *name)
-{
-	(void)fp; (void)flags; (void)name;
-	return CTF_ERR;
-}
-
-static inline int ctf_add_member(ctf_file_t *fp, ctf_id_t type,
-    const char *name, ctf_id_t memb)
-{
-	(void)fp; (void)type; (void)name; (void)memb;
-	return -1;
-}
-
-static inline int ctf_add_enumerator(ctf_file_t *fp, ctf_id_t type,
-    const char *name, int val)
-{
-	(void)fp; (void)type; (void)name; (void)val;
-	return -1;
-}
-
 static inline int ctf_discard(ctf_file_t *fp)
 {
 	(void)fp;
-	return -1;
+	return 0;
 }
 
 static inline int ctf_write(ctf_file_t *fp, int fd)
 {
 	(void)fp; (void)fd;
-	return -1;
-}
-
-static inline int ctf_update(ctf_file_t *fp)
-{
-	(void)fp;
-	return -1;
+	return 0;
 }
 
 static inline int ctf_set_array(ctf_file_t *fp, ctf_id_t type,
     const ctf_arinfo_t *arp)
 {
 	(void)fp; (void)type; (void)arp;
-	return -1;
+	return 0;
 }
 
 static inline int ctf_type_compat(ctf_file_t *fp1, ctf_id_t type1,
     ctf_file_t *fp2, ctf_id_t type2)
 {
-	(void)fp1; (void)type1; (void)fp2; (void)type2;
-	return 0;
-}
-
-static inline int ctf_getmodel(ctf_file_t *fp)
-{
-	(void)fp;
-	return CTF_MODEL_LP64;
+	(void)fp1; (void)fp2;
+	return type1 == type2 ? 1 : 0;
 }
 
 static inline ctf_id_t ctf_add_type(ctf_file_t *dst, ctf_file_t *src,
     ctf_id_t type)
 {
 	(void)dst; (void)src; (void)type;
-	return CTF_ERR;
-}
-
-static inline ctf_id_t ctf_add_array(ctf_file_t *fp, uint32_t flags,
-    const ctf_arinfo_t *arp)
-{
-	(void)fp; (void)flags; (void)arp;
 	return CTF_ERR;
 }
 
@@ -450,6 +633,49 @@ static inline ctf_id_t ctf_lookup_by_symbol(ctf_file_t *fp, unsigned long idx)
 {
 	(void)fp; (void)idx;
 	return CTF_ERR;
+}
+
+/* Additional stubs from dt_stubs_redox.c */
+static inline ctf_id_t ctf_type_pointer(ctf_file_t *fp, ctf_id_t type)
+{
+	(void)fp; (void)type;
+	return CTF_ERR;
+}
+
+static inline int ctf_type_cmp(ctf_file_t *fp1, ctf_id_t t1, ctf_file_t *fp2, ctf_id_t t2)
+{
+	(void)fp1; (void)fp2;
+	if (t1 == t2) return 0;
+	return (t1 < t2) ? -1 : 1;
+}
+
+static inline int ctf_enum_value(ctf_file_t *fp, ctf_id_t type, const char *name, int *valp)
+{
+	(void)fp; (void)type; (void)name; (void)valp;
+	return -1;
+}
+
+static inline ctf_id_t ctf_add_forward(ctf_file_t *fp, unsigned int flag, const char *name,
+    unsigned int kind)
+{
+	ctf_id_t id;
+	(void)flag;
+	if (!fp || fp->next_id >= CTF_REDOX_MAX_TYPES)
+		return CTF_ERR;
+	id = fp->next_id++;
+	strncpy(fp->types[id].name, name ? name : "", 63);
+	fp->types[id].name[63] = '\0';
+	fp->types[id].kind = (int)kind;
+	return id;
+}
+
+/* ctf_visit_f is a callback type */
+typedef int ctf_visit_f(const char *, ctf_id_t, unsigned long, int, void *);
+
+static inline int ctf_type_visit(ctf_file_t *fp, ctf_id_t type, ctf_visit_f *func, void *arg)
+{
+	(void)fp; (void)type; (void)func; (void)arg;
+	return 0;
 }
 
 #endif /* _SYS_CTF_API_H */

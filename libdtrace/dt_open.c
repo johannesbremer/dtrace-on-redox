@@ -722,7 +722,17 @@ dt_vopen(int version, int flags, int *errp,
 	dtp->dt_varg = arg;
 	pthread_mutex_init(&dtp->dt_sprintf_lock, NULL);
 	dt_dof_init(dtp);
+#ifdef __redox__
+	/* Redox: uname() may hang or not work properly in relibc, use static values */
+	memset(&dtp->dt_uts, 0, sizeof(dtp->dt_uts));
+	strcpy(dtp->dt_uts.sysname, "Redox");
+	strcpy(dtp->dt_uts.nodename, "redox");
+	strcpy(dtp->dt_uts.release, "1.0.0");
+	strcpy(dtp->dt_uts.version, "1.0.0");
+	strcpy(dtp->dt_uts.machine, "x86_64");
+#else
 	uname(&dtp->dt_uts);
+#endif
 
 	/*
 	 * The default module path is derived in part from the utsname release
@@ -768,11 +778,16 @@ dt_vopen(int version, int flags, int *errp,
 	 * frames that can be requested from the kernel.  The *frames options
 	 * cannot be set to a value that exceeds this limit.
 	 */
+#ifdef __redox__
+	/* Redox doesn't have /proc - use a reasonable default */
+	dtp->dt_maxframes = 127;
+#else
 	fd = fopen("/proc/sys/kernel/perf_event_max_stack", "r");
 	assert(fd);
 	if (fscanf(fd, "%lu", &dtp->dt_maxframes) != 1)
 		return set_open_errno(dtp, errp, EDT_READMAXSTACK);
 	fclose(fd);
+#endif
 	dtp->dt_options[DTRACEOPT_MAXFRAMES] = dtp->dt_maxframes;
 
 	/*
@@ -930,6 +945,7 @@ dt_vopen(int version, int flags, int *errp,
 
 	if ((dmp->dm_ctfp = ctf_create(&dtp->dt_ctferr)) == NULL)
 		return set_open_errno(dtp, errp, EDT_CTF);
+
 
 	dt_dprintf("created CTF container for %s (%p)\n",
 	    dmp->dm_name, (void *)dmp->dm_ctfp);

@@ -1538,6 +1538,9 @@ dtrace_update(dtrace_hdl_t *dtp)
 	    dmp != NULL; dmp = dt_list_next(dmp))
 		dt_module_unload(dtp, dmp);
 
+#ifdef __redox__
+	fd = NULL;  /* Redox doesn't have /proc/kallmodsyms or /proc/kallsyms */
+#else
 	/*
 	 * Note all the symbols currently loaded into the kernel's address
 	 * space and construct modules with appropriate address ranges from
@@ -1547,6 +1550,7 @@ dtrace_update(dtrace_hdl_t *dtp)
 		state = dt_kasstate_new(dtp, DT_MODSYM_KALLMODSYMS);
 	else if ((fd = fopen("/proc/kallsyms", "r")) != NULL)
 		state = dt_kasstate_new(dtp, DT_MODSYM_KALLSYMS);
+#endif
 
 	if (fd != NULL) {
 		char *line = NULL;
@@ -1739,7 +1743,7 @@ dtrace_lookup_by_name(dtrace_hdl_t *dtp, const char *object, const char *name,
 	 * Not found: search all modules, including non-kernel modules, loading
 	 * them as needed.
 	 */
-	for (; n > 0; n--, dmp = dt_list_next(dmp)) {
+	for (; n > 0 && dmp != NULL; n--, dmp = dt_list_next(dmp)) {
 		if ((dmp->dm_flags & mask) != bits)
 			continue; /* failed to match required attributes */
 
@@ -1942,7 +1946,7 @@ dtrace_lookup_by_type(dtrace_hdl_t *dtp, const char *object, const char *name,
 	if (tip == NULL)
 		tip = &ti;
 
-	for (; n > 0; n--, dmp = dt_list_next(dmp)) {
+	for (; n > 0 && dmp != NULL; n--, dmp = dt_list_next(dmp)) {
 		if ((dmp->dm_flags & mask) != bits)
 			continue; /* failed to match required attributes */
 

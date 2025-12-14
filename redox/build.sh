@@ -288,6 +288,12 @@ if [ -f "$BUILD/generated/dt_lex.c" ]; then
     compile_file "$BUILD/generated/dt_lex.c" "$BUILD/obj/libdtrace/dt_lex.o" || true
 fi
 
+# Error tags (generated)
+if [ -f "$SRC/redox/generated/dt_errtags.c" ]; then
+    cp "$SRC/redox/generated/dt_errtags.c" "$BUILD/generated/"
+    compile_file "$BUILD/generated/dt_errtags.c" "$BUILD/obj/libdtrace/dt_errtags.o" || true
+fi
+
 echo ""
 
 # =============================================================================

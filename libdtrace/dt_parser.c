@@ -172,8 +172,16 @@ int
 dt_type_lookup(const char *s, dtrace_typeinfo_t *tip)
 {
 	static const char delimiters[] = " \t\n\r\v\f*`";
-	dtrace_hdl_t *dtp = yypcb->pcb_hdl;
+	dtrace_hdl_t *dtp;
 	const char *p, *q, *end, *obj;
+
+	if (!yypcb) {
+		return -1;
+	}
+	dtp = yypcb->pcb_hdl;
+	if (!dtp) {
+		return -1;
+	}
 
 	for (p = s, end = s + strlen(s); *p != '\0'; p = q) {
 		while (isspace(*p))

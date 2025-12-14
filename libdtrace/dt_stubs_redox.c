@@ -12,7 +12,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <dt_impl.h>
 #include <dt_proc.h>
 #include <dt_program.h>
@@ -26,12 +28,25 @@ int open64(const char *path, int flags, ...)
 /* dt_proc.c stubs - process tracking not supported */
 void dt_proc_hash_create(dtrace_hdl_t *dtp)
 {
-	(void)dtp;
+	/*
+	 * Allocate a minimal proc hash structure so dt_open.c checks pass.
+	 * Process tracking isn't supported on Redox.
+	 */
+	dtp->dt_procs = calloc(1, sizeof(dt_proc_hash_t));
+	if (dtp->dt_procs != NULL) {
+		pthread_mutex_init(&dtp->dt_procs->dph_lock, NULL);
+		dtp->dt_procs->dph_hashlen = 1;
+		dtp->dt_procs->dph_lrulim = 8;
+	}
 }
 
 void dt_proc_hash_destroy(dtrace_hdl_t *dtp)
 {
-	(void)dtp;
+	if (dtp->dt_procs != NULL) {
+		pthread_mutex_destroy(&dtp->dt_procs->dph_lock);
+		free(dtp->dt_procs);
+		dtp->dt_procs = NULL;
+	}
 }
 
 void dt_proc_signal_init(dtrace_hdl_t *dtp)
@@ -154,6 +169,12 @@ void dt_btf_destroy(dtrace_hdl_t *dtp)
 	(void)dtp;
 }
 
+int dt_btf_get_module_ids(dtrace_hdl_t *dtp)
+{
+	(void)dtp;
+	return 0;
+}
+
 /* dt_rodata.c and dt_dis.c now compile correctly - no stubs needed */
 
 /* dt_dof.c stubs - DOF not used on Redox */
@@ -167,13 +188,7 @@ void dt_dof_fini(dtrace_hdl_t *dtp)
 	(void)dtp;
 }
 
-/* dt_cc.c support - error tag lookup */
-const char *dt_errtag(dt_errtag_t tag)
-{
-	static char buf[32];
-	snprintf(buf, sizeof(buf), "D_ERR_%d", (int)tag);
-	return buf;
-}
+/* dt_errtag is now provided by redox/generated/dt_errtags.c */
 
 /* dt_pcap.c stubs - packet capture not available */
 void dt_pcap_destroy(dtrace_hdl_t *dtp)
@@ -200,42 +215,9 @@ void dt_pebs_exit(dtrace_hdl_t *dtp)
 	(void)dtp;
 }
 
-/* CTF stubs - Compact Type Format not available on Redox */
-ctf_id_t ctf_type_pointer(ctf_file_t *fp, ctf_id_t type)
-{
-	(void)fp; (void)type;
-	return CTF_ERR;
-}
+/* CTF stubs are now in include/sys/ctf_api.h */
 
-int ctf_type_cmp(ctf_file_t *fp1, ctf_id_t t1, ctf_file_t *fp2, ctf_id_t t2)
-{
-	(void)fp1; (void)t1; (void)fp2; (void)t2;
-	return -1;
-}
-
-int ctf_enum_value(ctf_file_t *fp, ctf_id_t type, const char *name, int *valp)
-{
-	(void)fp; (void)type; (void)name; (void)valp;
-	return -1;
-}
-
-ctf_id_t ctf_add_forward(ctf_file_t *fp, uint_t flag, const char *name,
-    uint_t kind)
-{
-	(void)fp; (void)flag; (void)name; (void)kind;
-	return CTF_ERR;
-}
-
-/* ctf_visit_f is a callback type */
-typedef int ctf_visit_f_t(const char *, ctf_id_t, ulong_t, int, void *);
-
-int ctf_type_visit(ctf_file_t *fp, ctf_id_t type, ctf_visit_f_t *func, void *arg)
-{
-	(void)fp; (void)type; (void)func; (void)arg;
-	return -1;
-}
-
-/* dt_cg.c / dt_module.c support */
+/* dt_kern_path_lookup_by_name - dt_cg.c / dt_module.c support */
 const char *dt_kern_path_lookup_by_name(dtrace_hdl_t *dtp, const char *modname)
 {
 	(void)dtp; (void)modname;
@@ -250,6 +232,18 @@ void dt_conf_init(dtrace_hdl_t *dtp)
 	dtp->dt_conf.dtc_difintregs = 8;
 	dtp->dt_conf.dtc_diftupregs = 8;
 	dtp->dt_conf.dtc_ctfmodel = 2; /* LP64 */
+	
+	/* CPU configuration - Redox doesn't have /sys/devices/system/cpu */
+	dtp->dt_conf.num_possible_cpus = 1;
+	dtp->dt_conf.num_online_cpus = 1;
+	dtp->dt_conf.max_cpuid = 0;
+	
+	/* Allocate a single CPU info structure */
+	dtp->dt_conf.cpus = calloc(1, sizeof(cpuinfo_t));
+	if (dtp->dt_conf.cpus != NULL) {
+		dtp->dt_conf.cpus[0].cpu_id = 0;
+		dtp->dt_conf.cpus[0].cpu_chip = 0;
+	}
 }
 
 /* dtrace_proc_* API stubs - process control not available on Redox */
