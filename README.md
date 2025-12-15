@@ -8,6 +8,10 @@ It relies heavily on Oracle's work. They wanted their diff to upstream Linux as 
 
 This project is driven by academic interest and is not production-grade. It only runs on Redox nightly and is heavily work in progress, but some stuff works!
 
+### Installation
+
+A zip-file of the application can be downloaded [here](https://nightly.link/johannesbremer/dtrace-on-redox/workflows/build-dtrace/devel/dtrace-redox.zip).
+
 ### What's Working
 
 You can list available probes:
