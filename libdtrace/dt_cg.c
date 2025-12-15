@@ -3466,6 +3466,72 @@ dt_cg_load_var(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 		dt_regset_free(drp, BPF_REG_0);
 
 		return;
+#ifdef __redox__
+	/*
+	 * On Redox, we can't link bpf_dlib.o functions, so for built-in
+	 * variables that map directly to BPF helpers, we emit the helper
+	 * call directly instead of calling through dt_bvar_* functions.
+	 */
+	} else if (idp->di_id == DIF_VAR_TIMESTAMP ||
+		   idp->di_id == DIF_VAR_WALLTIMESTAMP) {
+		/* bpf_ktime_get_ns() - helper ID 5 */
+		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+		dt_regset_xalloc(drp, BPF_REG_0);
+		emit(dlp, BPF_CALL_HELPER(5));
+		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
+		dt_regset_free(drp, BPF_REG_0);
+		return;
+	} else if (idp->di_id == DIF_VAR_PID) {
+		/* bpf_get_current_pid_tgid() >> 32 - helper ID 14 */
+		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+		dt_regset_xalloc(drp, BPF_REG_0);
+		emit(dlp, BPF_CALL_HELPER(14));
+		emit(dlp, BPF_ALU64_IMM(BPF_RSH, BPF_REG_0, 32));
+		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
+		dt_regset_free(drp, BPF_REG_0);
+		return;
+	} else if (idp->di_id == DIF_VAR_TID) {
+		/* bpf_get_current_pid_tgid() & 0xffffffff - helper ID 14 */
+		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+		dt_regset_xalloc(drp, BPF_REG_0);
+		emit(dlp, BPF_CALL_HELPER(14));
+		emit(dlp, BPF_ALU64_IMM(BPF_AND, BPF_REG_0, 0xffffffff));
+		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
+		dt_regset_free(drp, BPF_REG_0);
+		return;
+	} else if (idp->di_id == DIF_VAR_UID) {
+		/* bpf_get_current_uid_gid() & 0xffffffff - helper ID 15 */
+		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+		dt_regset_xalloc(drp, BPF_REG_0);
+		emit(dlp, BPF_CALL_HELPER(15));
+		emit(dlp, BPF_ALU64_IMM(BPF_AND, BPF_REG_0, 0xffffffff));
+		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
+		dt_regset_free(drp, BPF_REG_0);
+		return;
+	} else if (idp->di_id == DIF_VAR_GID) {
+		/* bpf_get_current_uid_gid() >> 32 - helper ID 15 */
+		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+		dt_regset_xalloc(drp, BPF_REG_0);
+		emit(dlp, BPF_CALL_HELPER(15));
+		emit(dlp, BPF_ALU64_IMM(BPF_RSH, BPF_REG_0, 32));
+		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
+		dt_regset_free(drp, BPF_REG_0);
+		return;
+	} else if (idp->di_id == DIF_VAR_CURCPU) {
+		/* bpf_get_smp_processor_id() - helper ID 8 */
+		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+		dt_regset_xalloc(drp, BPF_REG_0);
+		emit(dlp, BPF_CALL_HELPER(8));
+		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
+		dt_regset_free(drp, BPF_REG_0);
+		return;
+#endif /* __redox__ */
 	} else {
 		char	*fn;
 

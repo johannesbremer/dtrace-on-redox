@@ -441,6 +441,8 @@ static const dt_typedef_t _dtrace_typedefs_32[] = {
 { "unsigned", "size_t" },
 { "long", "id_t" },
 { "long", "pid_t" },
+{ "unsigned", "uid_t" },
+{ "unsigned", "gid_t" },
 { NULL, NULL }
 };
 
@@ -469,6 +471,8 @@ static const dt_typedef_t _dtrace_typedefs_64[] = {
 { "unsigned long", "size_t" },
 { "int", "id_t" },
 { "int", "pid_t" },
+{ "unsigned", "uid_t" },
+{ "unsigned", "gid_t" },
 { NULL, NULL }
 };
 

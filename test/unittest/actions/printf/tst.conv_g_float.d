@@ -6,7 +6,7 @@
  */
 
 /*
- * ASSERTION: The printf action supports '%g' for floating point values.
+ * ASSERTION: The printf action supports '%G' for floating point values.
  *
  * SECTION: Actions/printf()
  */
@@ -17,6 +17,6 @@ float f;
 
 BEGIN
 {
-	printf("%g", f);
+	printf("%G", f);
 	exit(0);
 }

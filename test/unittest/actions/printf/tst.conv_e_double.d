@@ -6,7 +6,7 @@
  */
 
 /*
- * ASSERTION: The printf action supports '%e' for double floating point values.
+ * ASSERTION: The printf action supports '%E' for double floating point values.
  *
  * SECTION: Actions/printf()
  */
@@ -17,6 +17,6 @@ double d;
 
 BEGIN
 {
-	printf("%e", d);
+	printf("%E", d);
 	exit(0);
 }

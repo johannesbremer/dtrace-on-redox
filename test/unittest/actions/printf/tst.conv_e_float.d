@@ -6,7 +6,7 @@
  */
 
 /*
- * ASSERTION: The printf action supports '%e' for floating point values.
+ * ASSERTION: The printf action supports '%E' for floating point values.
  *
  * SECTION: Actions/printf()
  */
@@ -17,6 +17,6 @@ float f;
 
 BEGIN
 {
-	printf("%e", f);
+	printf("%E", f);
 	exit(0);
 }
