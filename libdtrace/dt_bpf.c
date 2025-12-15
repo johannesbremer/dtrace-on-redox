@@ -691,6 +691,15 @@ dt_bpf_init(dtrace_hdl_t *dtp)
 #if defined(__linux__)
 	dt_bpf_init_helpers(dtp);
 #else
+	/*
+	 * Initialize helper ID mapping: each helper maps to itself.
+	 * On Linux this is done in dt_bpf_init_helpers() which also
+	 * checks for helper availability. On non-Linux we assume all
+	 * our emulated helpers are available.
+	 */
+	for (uint32_t i = 0; i < __BPF_FUNC_MAX_ID; i++)
+		dtp->dt_bpfhelper[i] = i;
+
 	/* Register user-space helper emulations for non-Linux platforms */
 	dt_bpf_register_rbpf_helpers();
 #endif

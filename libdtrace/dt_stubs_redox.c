@@ -404,8 +404,39 @@ dt_dlib_init_redox(dtrace_hdl_t *dtp)
 	 */
 	static const char *other_funcs[] = {
 		"dt_error",		/* Error handling */
+		"dt_probe_error",	/* Probe error handling (fault reporting) */
 		"dt_get_agg",		/* Aggregation access */
 		"dt_get_dvar",		/* Dynamic variable access */
+		"dt_get_assoc",		/* Associative array access */
+		"dt_get_tvar",		/* Thread-local variable access */
+		"dt_speculation",	/* speculation() builtin */
+		"dt_speculation_set_drainable",	/* speculation draining */
+		"dt_speculation_speculate",	/* speculate() action */
+		"dt_strcmp",		/* String comparison */
+		"dt_strchr",		/* strchr() builtin */
+		"dt_strrchr",		/* strrchr() builtin */
+		"dt_strlen",		/* strlen() builtin */
+		"dt_strjoin",		/* strjoin() builtin */
+		"dt_substr",		/* substr() builtin */
+		"dt_strtok",		/* strtok() builtin */
+		"dt_index",		/* index() builtin */
+		"dt_rindex",		/* rindex() builtin */
+		"dt_progenyof",		/* progenyof() builtin */
+		"dt_tlskey",		/* TLS key access */
+		"dt_agg_lqbin",		/* Linear quantize aggregation */
+		"dt_agg_qbin",		/* Quantize aggregation */
+		"dt_basename",		/* basename() builtin */
+		"dt_cleanpath",		/* cleanpath() builtin */
+		"dt_dirname",		/* dirname() builtin */
+		"dt_lltostr",		/* lltostr() builtin */
+		"dt_inet_ntoa",		/* inet_ntoa() builtin */
+		"dt_inet_ntoa6",	/* inet_ntoa6() builtin */
+		"dt_link_ntop",		/* link_ntop() builtin */
+		"dt_mutex_owned",	/* mutex_owned() builtin */
+		"dt_mutex_owner",	/* mutex_owner() builtin */
+		"dt_rw_iswriter",	/* rw_iswriter() builtin */
+		"dt_rw_read_held",	/* rw_read_held() builtin */
+		"dt_rw_write_held",	/* rw_write_held() builtin */
 		NULL
 	};
 

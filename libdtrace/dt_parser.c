@@ -4933,6 +4933,10 @@ dt_node_diftype(dtrace_hdl_t *dtp, const dt_node_t *dnp, dtrace_diftype_t *tp)
 	    dnp->dn_type == DT_STR_TYPE(dtp)) {
 		tp->dtdt_kind = DIF_TYPE_STRING;
 		tp->dtdt_ckind = CTF_K_UNKNOWN;
+		tp->dtdt_flags = (dnp->dn_flags & DT_NF_REF) ? DIF_TF_BYREF : 0;
+		tp->dtdt_align = 1;
+		tp->dtdt_size = dtp->dt_options[DTRACEOPT_STRSIZE];
+		return;
 	} else if (dnp->dn_ctfp == DT_DYN_CTFP(dtp) &&
 		   dnp->dn_type == DT_DYN_TYPE(dtp)) {
 		tp->dtdt_kind = DIF_TYPE_ANY;

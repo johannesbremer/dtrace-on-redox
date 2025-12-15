@@ -162,12 +162,12 @@ helper_map_lookup_elem(uint64_t map_fd, uint64_t key_ptr, uint64_t arg2,
 	(void)arg4;
 
 	if (dt_bpf_backend == NULL || dt_bpf_backend->map_lookup_ptr == NULL) {
+		fprintf(stderr, "DEBUG map_lookup: backend NULL\n");
 		return 0;  /* NULL pointer */
 	}
 
-	if (key_ptr == 0) {
+	if (key_ptr == 0)
 		return 0;
-	}
 
 	/* The key_ptr is a pointer in BPF memory - dereference it to get actual key */
 	key = *(uint32_t *)(uintptr_t)key_ptr;
@@ -402,6 +402,7 @@ helper_probe_read_str(uint64_t dst, uint64_t size, uint64_t src,
 		return (uint64_t)-EFAULT;
 
 	len = strlen((const char *)(uintptr_t)src);
+
 	if (len >= size)
 		len = size - 1;
 
@@ -452,8 +453,6 @@ helper_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
 
 	/* Safety check */
 	if (size > sizeof(output_buf) - 4) {
-		fprintf(stderr, "perf_event_output: data too large (%lu > %zu)\n",
-			(unsigned long)size, sizeof(output_buf) - 4);
 		return -1;
 	}
 
@@ -475,19 +474,20 @@ helper_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
 /*
  * Helper: bpf_trace_printk
  *
- * Debug printf - just returns 0 in user-space for now.
+ * Debug printf - prints format string with up to 3 arguments.
  */
 static uint64_t
 helper_trace_printk(uint64_t fmt, uint64_t fmt_size, uint64_t arg1,
 		    uint64_t arg2, uint64_t arg3)
 {
-	(void)fmt;
+	const char *fmt_str = (const char *)(uintptr_t)fmt;
+	
 	(void)fmt_size;
-	(void)arg1;
-	(void)arg2;
-	(void)arg3;
 
-	/* Could implement actual printing if needed */
+	/* Simple debug printing */
+	fprintf(stderr, "BPF_TRACE: ");
+	fprintf(stderr, fmt_str, arg1, arg2, arg3);
+
 	return 0;
 }
 
