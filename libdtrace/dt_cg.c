@@ -3472,13 +3472,21 @@ dt_cg_load_var(dt_node_t *dnp, dt_irlist_t *dlp, dt_regset_t *drp)
 	 * variables that map directly to BPF helpers, we emit the helper
 	 * call directly instead of calling through dt_bvar_* functions.
 	 */
-	} else if (idp->di_id == DIF_VAR_TIMESTAMP ||
-		   idp->di_id == DIF_VAR_WALLTIMESTAMP) {
-		/* bpf_ktime_get_ns() - helper ID 5 */
+	} else if (idp->di_id == DIF_VAR_TIMESTAMP) {
+		/* bpf_ktime_get_ns() - helper ID 5 (monotonic time) */
 		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
 			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
 		dt_regset_xalloc(drp, BPF_REG_0);
 		emit(dlp, BPF_CALL_HELPER(5));
+		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
+		dt_regset_free(drp, BPF_REG_0);
+		return;
+	} else if (idp->di_id == DIF_VAR_WALLTIMESTAMP) {
+		/* dt_ktime_get_real_ns() - DTrace helper 200 (wall time) */
+		if ((dnp->dn_reg = dt_regset_alloc(drp)) == -1)
+			longjmp(yypcb->pcb_jmpbuf, EDT_NOREG);
+		dt_regset_xalloc(drp, BPF_REG_0);
+		emit(dlp, BPF_CALL_HELPER(200));
 		emit(dlp, BPF_MOV_REG(dnp->dn_reg, BPF_REG_0));
 		dt_regset_free(drp, BPF_REG_0);
 		return;

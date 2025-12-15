@@ -48,6 +48,12 @@
 #define BPF_FUNC_probe_read_kernel_str	115
 
 /*
+ * DTrace-specific helper IDs (high numbers to avoid conflicts with Linux BPF,
+ * but less than RBPF_MAX_HELPERS which is 256)
+ */
+#define DT_BPF_FUNC_ktime_get_real_ns	200
+
+/*
  * User-space perf ring buffer for Redox.
  *
  * This simulates the Linux perf_event ring buffer format so that
@@ -265,6 +271,31 @@ helper_ktime_get_ns(uint64_t arg0, uint64_t arg1, uint64_t arg2,
 
 #ifdef CLOCK_MONOTONIC
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+		return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+	return 0;
+}
+
+/*
+ * Helper: dt_ktime_get_real_ns (DTrace-specific)
+ *
+ * Returns real/wall time in nanoseconds since Unix epoch.
+ * This is used for the walltimestamp built-in variable.
+ */
+static uint64_t
+helper_ktime_get_real_ns(uint64_t arg0, uint64_t arg1, uint64_t arg2,
+			 uint64_t arg3, uint64_t arg4)
+{
+	struct timespec ts;
+
+	(void)arg0;
+	(void)arg1;
+	(void)arg2;
+	(void)arg3;
+	(void)arg4;
+
+#ifdef CLOCK_REALTIME
+	if (clock_gettime(CLOCK_REALTIME, &ts) == 0)
 		return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 	return 0;
@@ -562,6 +593,11 @@ dt_bpf_register_rbpf_helpers(void)
 		rc |= dt_bpf_backend->register_helper(
 			BPF_FUNC_probe_read_kernel_str,
 			(dt_bpf_helper_fn)helper_probe_read_str);
+
+		/* DTrace-specific helpers */
+		rc |= dt_bpf_backend->register_helper(
+			DT_BPF_FUNC_ktime_get_real_ns,
+			(dt_bpf_helper_fn)helper_ktime_get_real_ns);
 	}
 
 	return rc;
