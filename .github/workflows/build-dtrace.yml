@@ -1,0 +1,33 @@
+name: Build DTrace for Redox
+
+on:
+  push:
+    branches:
+      - devel
+
+jobs:
+  build-redox:
+    name: Build DTrace for RedoxOS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Create build directory
+        run: mkdir -p /tmp/dtrace-redox-build
+
+      - name: Build DTrace for Redox
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/src \
+            -v /tmp/dtrace-redox-build:/build \
+            redoxos/redoxer:latest \
+            bash /src/redox/build.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtrace-redox-${{ github.sha }}
+          path: /tmp/dtrace-redox-build/
+          retention-days: 30
