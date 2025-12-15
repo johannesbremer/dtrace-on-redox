@@ -76,10 +76,12 @@ dt_coredump(void)
 	sigemptyset(&act.sa_mask);
 	sigaction(SIGABRT, &act, NULL);
 
+#ifndef __redox__
 	lim.rlim_cur = RLIM_INFINITY;
 	lim.rlim_max = RLIM_INFINITY;
 
 	setrlimit(RLIMIT_CORE, &lim);
+#endif
 	abort();
 }
 

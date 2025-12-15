@@ -682,10 +682,12 @@ dt_vopen(int version, int flags, int *errp,
 	 * bound on the number of processes that we could concurrently
 	 * instrument with the pid provider.
 	 */
+#ifndef __redox__
 	if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
 		rl.rlim_cur = rl.rlim_max;
 		setrlimit(RLIMIT_NOFILE, &rl);
 	}
+#endif
 
 	if ((dtp = malloc(sizeof(dtrace_hdl_t))) == NULL)
 		return set_open_errno(dtp, errp, EDT_NOMEM);
@@ -1236,10 +1238,12 @@ dtrace_init(dtrace_hdl_t *dtp)
 	/*
 	 * Set the locked-memory limit.
 	 */
+#ifndef __redox__
 	if (lockmem == DTRACEOPT_UNSET)
 		lockmem = RLIM_INFINITY;
 	rl.rlim_cur = rl.rlim_max = lockmem;
 	setrlimit(RLIMIT_MEMLOCK, &rl);
+#endif
 
 	/*
 	 * Initialize the BPF library handling.
