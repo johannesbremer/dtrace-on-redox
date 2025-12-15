@@ -28,6 +28,6 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: dtrace-redox-${{ github.sha }}
+          name: dtrace-redox
           path: /tmp/dtrace-redox-build/
           retention-days: 30
