@@ -10,22 +10,6 @@
 )]
 // Test examples from README.md as part as doc tests.
 #![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
-// There are unused mut warnings due to unsafe code.
-#![allow(unused_mut)]
-// Allows old-style clippy
-#![allow(renamed_and_removed_lints)]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    allow(
-        redundant_field_names,
-        single_match,
-        cast_lossless,
-        doc_markdown,
-        match_same_arms,
-        unreadable_literal
-    )
-)]
 // Configures the crate to be `no_std` when `std` feature is disabled.
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -51,6 +35,8 @@ extern crate cranelift_native;
 
 use crate::lib::*;
 use byteorder::{ByteOrder, LittleEndian};
+use std::ops::Range;
+use stack::{StackUsage, StackVerifier};
 
 mod asm_parser;
 pub mod assembler;
@@ -61,10 +47,11 @@ pub mod ebpf;
 pub mod helpers;
 pub mod insn_builder;
 mod interpreter;
-#[cfg(all(not(windows), feature = "std"))]
+#[cfg(not(windows))]
 mod jit;
 #[cfg(not(feature = "std"))]
 mod no_std_error;
+mod stack;
 mod verifier;
 
 /// Reexports all the types needed from the `std`, `core`, and `alloc`
@@ -78,12 +65,16 @@ pub mod lib {
         pub use std::*;
     }
 
+    pub use self::core::any::Any;
     pub use self::core::convert::TryInto;
+    pub use self::core::f64;
     pub use self::core::mem;
     pub use self::core::mem::ManuallyDrop;
     pub use self::core::ptr;
-
-    pub use self::core::{f64, u32, u64};
+    #[cfg(not(feature = "std"))]
+    pub use hashbrown::{HashMap, HashSet};
+    #[cfg(feature = "std")]
+    pub use std::collections::{HashMap, HashSet};
 
     #[cfg(feature = "std")]
     pub use std::println;
@@ -93,7 +84,14 @@ pub mod lib {
     #[cfg(not(feature = "std"))]
     pub use alloc::vec::Vec;
     #[cfg(feature = "std")]
+    pub use std::vec;
+    #[cfg(feature = "std")]
     pub use std::vec::Vec;
+
+    #[cfg(not(feature = "std"))]
+    pub use alloc::boxed::Box;
+    #[cfg(feature = "std")]
+    pub use std::boxed::Box;
 
     #[cfg(not(feature = "std"))]
     pub use alloc::string::{String, ToString};
@@ -104,9 +102,9 @@ pub mod lib {
     // BTree-based implementations of Maps and Sets. The cranelift module uses
     // BTrees by default, hence we need to expose it twice here.
     #[cfg(not(feature = "std"))]
-    pub use alloc::collections::{BTreeMap as HashMap, BTreeMap, BTreeSet as HashSet, BTreeSet};
+    pub use alloc::collections::BTreeMap;
     #[cfg(feature = "std")]
-    pub use std::collections::{BTreeMap, HashMap, HashSet};
+    pub use std::collections::BTreeMap;
 
     /// In no_std we use a custom implementation of the error which acts as a
     /// replacement for the io Error.
@@ -117,6 +115,8 @@ pub mod lib {
 
     #[cfg(not(feature = "std"))]
     pub use alloc::format;
+    #[cfg(feature = "std")]
+    pub use std::format;
 }
 
 /// eBPF verification function that returns an error if the program does not meet its requirements.
@@ -131,6 +131,9 @@ pub type Verifier = fn(prog: &[u8]) -> Result<(), Error>;
 
 /// eBPF helper function.
 pub type Helper = fn(u64, u64, u64, u64, u64) -> u64;
+
+/// eBPF stack usage calculator function.
+pub type StackUsageCalculator = fn(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16;
 
 // A metadata buffer with two offset indications. It can be used in one kind of eBPF VM to simulate
 // the use of a metadata buffer each time the program is executed, without the user having to
@@ -177,12 +180,16 @@ struct MetaBuff {
 pub struct EbpfVmMbuff<'a> {
     prog: Option<&'a [u8]>,
     verifier: Verifier,
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     jit: Option<jit::JitMemory<'a>>,
+    #[cfg(all(not(windows), not(feature = "std")))]
+    custom_exec_memory: Option<&'a mut [u8]>,
     #[cfg(feature = "cranelift")]
     cranelift_prog: Option<cranelift::CraneliftProgram>,
     helpers: HashMap<u32, ebpf::Helper>,
-    allowed_memory: HashSet<u64>,
+    allowed_memory: HashSet<Range<u64>>,
+    stack_usage: Option<StackUsage>,
+    stack_verifier: StackVerifier,
 }
 
 impl<'a> EbpfVmMbuff<'a> {
@@ -202,19 +209,27 @@ impl<'a> EbpfVmMbuff<'a> {
     /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog)).unwrap();
     /// ```
     pub fn new(prog: Option<&'a [u8]>) -> Result<EbpfVmMbuff<'a>, Error> {
-        if let Some(prog) = prog {
+        let mut stack_verifier = StackVerifier::new(None, None);
+        let stack_usage = if let Some(prog) = prog {
             verifier::check(prog)?;
-        }
+            Some(stack_verifier.stack_validate(prog)?)
+        } else {
+            None
+        };
 
         Ok(EbpfVmMbuff {
             prog,
             verifier: verifier::check,
-            #[cfg(all(not(windows), feature = "std"))]
+            #[cfg(not(windows))]
             jit: None,
+            #[cfg(all(not(windows), not(feature = "std")))]
+            custom_exec_memory: None,
             #[cfg(feature = "cranelift")]
             cranelift_prog: None,
             helpers: HashMap::new(),
             allowed_memory: HashSet::new(),
+            stack_usage,
+            stack_verifier,
         })
     }
 
@@ -239,7 +254,9 @@ impl<'a> EbpfVmMbuff<'a> {
     /// ```
     pub fn set_program(&mut self, prog: &'a [u8]) -> Result<(), Error> {
         (self.verifier)(prog)?;
+        let stack_usage = self.stack_verifier.stack_validate(prog)?;
         self.prog = Some(prog);
+        self.stack_usage = Some(stack_usage);
         Ok(())
     }
 
@@ -278,6 +295,68 @@ impl<'a> EbpfVmMbuff<'a> {
             verifier(prog)?;
         }
         self.verifier = verifier;
+        Ok(())
+    }
+
+    /// Set a new stack usage calculator function. The function should return the stack usage
+    /// of the program in bytes. If a program has been loaded to the VM already, the calculator
+    /// is immediately run.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rbpf::lib::{Error, ErrorKind};
+    /// use rbpf::ebpf;
+    /// use core::any::Any;
+    /// // Define a simple stack usage calculator function.
+    /// fn calculator(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16 {
+    ///    // This is a dummy implementation, just for the example.
+    ///    // In a real implementation, you would calculate the stack usage based on the program.
+    ///    // Here we just return a fixed value.
+    ///    16
+    /// }
+    ///
+    /// let prog1 = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    ///
+    /// // Instantiate a VM.
+    /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog1)).unwrap();
+    /// // Change the stack usage calculator.
+    /// vm.set_stack_usage_calculator(calculator, Box::new(())).unwrap();
+    /// ```
+    pub fn set_stack_usage_calculator(
+        &mut self,
+        calculator: StackUsageCalculator,
+        data: Box<dyn Any>,
+    ) -> Result<(), Error> {
+        let mut stack_verifier = StackVerifier::new(Some(calculator), Some(data));
+        if let Some(prog) = self.prog {
+            self.stack_usage = Some(stack_verifier.stack_validate(prog)?);
+        }
+        self.stack_verifier = stack_verifier;
+        Ok(())
+    }
+
+    /// Set a custom executable memory for the JIT-compiled program.
+    /// We need this for no_std because we cannot use the default memory allocator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let prog = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog)).unwrap();
+    /// let mut memory = [0u8; 1024];
+    /// // Use mmap or other means to modify the permissions of the memory to be executable.
+    /// vm.set_jit_exec_memory(&mut memory);
+    /// ```
+    #[cfg(all(not(windows), not(feature = "std")))]
+    pub fn set_jit_exec_memory(&mut self, memory: &'a mut [u8]) -> Result<(), Error> {
+        self.custom_exec_memory = Some(memory);
         Ok(())
     }
 
@@ -337,7 +416,6 @@ impl<'a> EbpfVmMbuff<'a> {
     /// # Examples
     ///
     /// ```
-    /// use std::iter::FromIterator;
     /// use std::ptr::addr_of;
     ///
     /// struct MapValue {
@@ -353,13 +431,10 @@ impl<'a> EbpfVmMbuff<'a> {
     /// // Instantiate a VM.
     /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog)).unwrap();
     /// let start = addr_of!(VALUE) as u64;
-    /// let addrs = Vec::from_iter(start..start+size_of::<MapValue>() as u64);
-    /// vm.register_allowed_memory(&addrs);
+    /// vm.register_allowed_memory(start..start+size_of::<MapValue>() as u64);
     /// ```
-    pub fn register_allowed_memory(&mut self, addrs: &[u64]) -> () {
-        for i in addrs {
-            self.allowed_memory.insert(*i);
-        }
+    pub fn register_allowed_memory(&mut self, addrs_range: Range<u64>) {
+        self.allowed_memory.insert(addrs_range);
     }
 
     /// Execute the program loaded, with the given packet data and metadata buffer.
@@ -399,7 +474,15 @@ impl<'a> EbpfVmMbuff<'a> {
     /// assert_eq!(res, 0x2211);
     /// ```
     pub fn execute_program(&self, mem: &[u8], mbuff: &[u8]) -> Result<u64, Error> {
-        interpreter::execute_program(self.prog, mem, mbuff, &self.helpers, &self.allowed_memory)
+        let stack_usage = self.stack_usage.as_ref();
+        interpreter::execute_program(
+            self.prog,
+            stack_usage,
+            mem,
+            mbuff,
+            &self.helpers,
+            &self.allowed_memory,
+        )
     }
 
     /// JIT-compile the loaded program. No argument required for this.
@@ -421,16 +504,35 @@ impl<'a> EbpfVmMbuff<'a> {
     ///
     /// vm.jit_compile();
     /// ```
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub fn jit_compile(&mut self) -> Result<(), Error> {
         let prog = match self.prog {
             Some(prog) => prog,
-            None => Err(Error::new(
-                ErrorKind::Other,
+            None => Err(Error::other(
                 "Error: No program set, call prog_set() to load one",
             ))?,
         };
-        self.jit = Some(jit::JitMemory::new(prog, &self.helpers, true, false)?);
+        #[cfg(feature = "std")]
+        {
+            self.jit = Some(jit::JitMemory::new(prog, &self.helpers, true, false)?);
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let exec_memory = match self.custom_exec_memory.take() {
+                Some(memory) => memory,
+                None => return Err(Error::new(
+                    ErrorKind::Other,
+                    "Error: No custom executable memory set, call set_jit_exec_memory() to set one",
+                ))?,
+            };
+            self.jit = Some(jit::JitMemory::new(
+                prog,
+                exec_memory,
+                &self.helpers,
+                true,
+                false,
+            )?);
+        }
         Ok(())
     }
 
@@ -486,7 +588,7 @@ impl<'a> EbpfVmMbuff<'a> {
     ///     assert_eq!(res, 0x2211);
     /// }
     /// ```
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub unsafe fn execute_program_jit(
         &self,
         mem: &mut [u8],
@@ -497,7 +599,7 @@ impl<'a> EbpfVmMbuff<'a> {
         //  in the kernel; anyway the verifier would prevent the use of uninitialized registers).
         //  See `mul_loop` test.
         let mem_ptr = match mem.len() {
-            0 => std::ptr::null_mut(),
+            0 => core::ptr::null_mut(),
             _ => mem.as_ptr() as *mut u8,
         };
         // The last two arguments are not used in this function. They would be used if there was a
@@ -512,8 +614,7 @@ impl<'a> EbpfVmMbuff<'a> {
                 0,
                 0,
             )),
-            None => Err(Error::new(
-                ErrorKind::Other,
+            None => Err(Error::other(
                 "Error: program has not been JIT-compiled",
             )),
         }
@@ -550,7 +651,7 @@ impl<'a> EbpfVmMbuff<'a> {
             ))?,
         };
 
-        let mut compiler = CraneliftCompiler::new(self.helpers.clone());
+        let compiler = CraneliftCompiler::new(self.helpers.clone());
         let program = compiler.compile_function(prog)?;
 
         self.cranelift_prog = Some(program);
@@ -816,6 +917,63 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         self.parent.set_verifier(verifier)
     }
 
+    /// Set a new stack usage calculator function. The function should return the stack usage
+    /// of the program in bytes. If a program has been loaded to the VM already, the calculator
+    /// is immediately run.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rbpf::lib::{Error, ErrorKind};
+    /// use rbpf::ebpf;
+    /// use core::any::Any;
+    /// // Define a simple stack usage calculator function.
+    /// fn calculator(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16 {
+    ///    // This is a dummy implementation, just for the example.
+    ///    // In a real implementation, you would calculate the stack usage based on the program.
+    ///    // Here we just return a fixed value.
+    ///    16
+    /// }
+    ///
+    /// let prog1 = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    ///
+    /// // Instantiate a VM.
+    /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog1)).unwrap();
+    /// // Change the stack usage calculator.
+    /// vm.set_stack_usage_calculator(calculator, Box::new(())).unwrap();
+    /// ```
+    pub fn set_stack_usage_calculator(
+        &mut self,
+        calculator: StackUsageCalculator,
+        data: Box<dyn Any>,
+    ) -> Result<(), Error> {
+        self.parent.set_stack_usage_calculator(calculator, data)
+    }
+
+    /// Set a custom executable memory for the JIT-compiled program.
+    /// We need this for no_std because we cannot use the default memory allocator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let prog = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    /// let mut vm = rbpf::EbpfVmFixedMbuff::new(Some(prog), 0x40, 0x50).unwrap();
+    /// let mut memory = [0u8; 1024];
+    /// // Use mmap or other means to modify the permissions of the memory to be executable.
+    /// vm.set_jit_exec_memory(&mut memory);
+    /// ```
+    #[cfg(all(not(windows), not(feature = "std")))]
+    pub fn set_jit_exec_memory(&mut self, memory: &'a mut [u8]) -> Result<(), Error> {
+        self.parent.custom_exec_memory = Some(memory);
+        Ok(())
+    }
+
     /// Register a built-in or user-defined helper function in order to use it later from within
     /// the eBPF program. The helper is registered into a hashmap, so the `key` can be any `u32`.
     ///
@@ -883,7 +1041,6 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     /// # Examples
     ///
     /// ```
-    /// use std::iter::FromIterator;
     /// use std::ptr::addr_of;
     ///
     /// struct MapValue {
@@ -899,11 +1056,10 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     /// // Instantiate a VM.
     /// let mut vm = rbpf::EbpfVmFixedMbuff::new(Some(prog), 0x40, 0x50).unwrap();
     /// let start = addr_of!(VALUE) as u64;
-    /// let addrs = Vec::from_iter(start..start+size_of::<MapValue>() as u64);
-    /// vm.register_allowed_memory(&addrs);
+    /// vm.register_allowed_memory(start..start+size_of::<MapValue>() as u64);
     /// ```
-    pub fn register_allowed_memory(&mut self, allowed: &[u64]) -> () {
-        self.parent.register_allowed_memory(allowed)
+    pub fn register_allowed_memory(&mut self, addrs_range: Range<u64>) {
+        self.parent.register_allowed_memory(addrs_range)
     }
 
     /// Execute the program loaded, with the given packet data.
@@ -940,7 +1096,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         let l = self.mbuff.buffer.len();
         // Can this ever happen? Probably not, should be ensured at mbuff creation.
         if self.mbuff.data_offset + 8 > l || self.mbuff.data_end_offset + 8 > l {
-            Err(Error::new(ErrorKind::Other, format!("Error: buffer too small ({:?}), cannot use data_offset {:?} and data_end_offset {:?}",
+            Err(Error::other(format!("Error: buffer too small ({:?}), cannot use data_offset {:?} and data_end_offset {:?}",
             l, self.mbuff.data_offset, self.mbuff.data_end_offset)))?;
         }
         LittleEndian::write_u64(
@@ -977,16 +1133,35 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     ///
     /// vm.jit_compile();
     /// ```
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub fn jit_compile(&mut self) -> Result<(), Error> {
         let prog = match self.parent.prog {
             Some(prog) => prog,
-            None => Err(Error::new(
-                ErrorKind::Other,
+            None => Err(Error::other(
                 "Error: No program set, call prog_set() to load one",
             ))?,
         };
-        self.parent.jit = Some(jit::JitMemory::new(prog, &self.parent.helpers, true, true)?);
+        #[cfg(feature = "std")]
+        {
+            self.parent.jit = Some(jit::JitMemory::new(prog, &self.parent.helpers, true, true)?);
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let exec_memory = match self.parent.custom_exec_memory.take() {
+                Some(memory) => memory,
+                None => return Err(Error::new(
+                    ErrorKind::Other,
+                    "Error: No custom executable memory set, call set_jit_exec_memory() to set one",
+                ))?,
+            };
+            self.parent.jit = Some(jit::JitMemory::new(
+                prog,
+                exec_memory,
+                &self.parent.helpers,
+                true,
+                true,
+            )?);
+        }
         Ok(())
     }
 
@@ -1038,7 +1213,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     /// ```
     // This struct redefines the `execute_program_jit()` function, in order to pass the offsets
     // associated with the fixed mbuff.
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub unsafe fn execute_program_jit(&mut self, mem: &'a mut [u8]) -> Result<u64, Error> {
         // If packet data is empty, do not send the address of an empty slice; send a null pointer
         //  as first argument instead, as this is uBPF's behavior (empty packet should not happen
@@ -1058,8 +1233,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
                 self.mbuff.data_offset,
                 self.mbuff.data_end_offset,
             )),
-            None => Err(Error::new(
-                ErrorKind::Other,
+            None => Err(Error::other(
                 "Error: program has not been JIT-compiled",
             )),
         }
@@ -1100,7 +1274,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
             ))?,
         };
 
-        let mut compiler = CraneliftCompiler::new(self.parent.helpers.clone());
+        let compiler = CraneliftCompiler::new(self.parent.helpers.clone());
         let program = compiler.compile_function(prog)?;
 
         self.parent.cranelift_prog = Some(program);
@@ -1295,6 +1469,63 @@ impl<'a> EbpfVmRaw<'a> {
         self.parent.set_verifier(verifier)
     }
 
+    /// Set a new stack usage calculator function. The function should return the stack usage
+    /// of the program in bytes. If a program has been loaded to the VM already, the calculator
+    /// is immediately run.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rbpf::lib::{Error, ErrorKind};
+    /// use rbpf::ebpf;
+    /// use core::any::Any;
+    /// // Define a simple stack usage calculator function.
+    /// fn calculator(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16 {
+    ///    // This is a dummy implementation, just for the example.
+    ///    // In a real implementation, you would calculate the stack usage based on the program.
+    ///    // Here we just return a fixed value.
+    ///    16
+    /// }
+    ///
+    /// let prog1 = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    ///
+    /// // Instantiate a VM.
+    /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog1)).unwrap();
+    /// // Change the stack usage calculator.
+    /// vm.set_stack_usage_calculator(calculator, Box::new(())).unwrap();
+    /// ```
+    pub fn set_stack_usage_calculator(
+        &mut self,
+        calculator: StackUsageCalculator,
+        data: Box<dyn Any>,
+    ) -> Result<(), Error> {
+        self.parent.set_stack_usage_calculator(calculator, data)
+    }
+
+    /// Set a custom executable memory for the JIT-compiled program.
+    /// We need this for no_std because we cannot use the default memory allocator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let prog = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    /// let mut vm = rbpf::EbpfVmRaw::new(Some(prog)).unwrap();
+    /// let mut memory = [0u8; 1024];
+    /// // Use mmap or other means to modify the permissions of the memory to be executable.
+    /// vm.set_jit_exec_memory(&mut memory);
+    /// ```
+    #[cfg(all(not(windows), not(feature = "std")))]
+    pub fn set_jit_exec_memory(&mut self, memory: &'a mut [u8]) -> Result<(), Error> {
+        self.parent.custom_exec_memory = Some(memory);
+        Ok(())
+    }
+
     /// Register a built-in or user-defined helper function in order to use it later from within
     /// the eBPF program. The helper is registered into a hashmap, so the `key` can be any `u32`.
     ///
@@ -1355,7 +1586,6 @@ impl<'a> EbpfVmRaw<'a> {
     /// # Examples
     ///
     /// ```
-    /// use std::iter::FromIterator;
     /// use std::ptr::addr_of;
     ///
     /// struct MapValue {
@@ -1371,11 +1601,10 @@ impl<'a> EbpfVmRaw<'a> {
     /// // Instantiate a VM.
     /// let mut vm = rbpf::EbpfVmRaw::new(Some(prog)).unwrap();
     /// let start = addr_of!(VALUE) as u64;
-    /// let addrs = Vec::from_iter(start..start+size_of::<MapValue>() as u64);
-    /// vm.register_allowed_memory(&addrs);
+    /// vm.register_allowed_memory(start..start+size_of::<MapValue>() as u64);
     /// ```
-    pub fn register_allowed_memory(&mut self, allowed: &[u64]) -> () {
-        self.parent.register_allowed_memory(allowed)
+    pub fn register_allowed_memory(&mut self, addrs_range: Range<u64>) {
+        self.parent.register_allowed_memory(addrs_range)
     }
 
     /// Execute the program loaded, with the given packet data.
@@ -1422,21 +1651,40 @@ impl<'a> EbpfVmRaw<'a> {
     ///
     /// vm.jit_compile();
     /// ```
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub fn jit_compile(&mut self) -> Result<(), Error> {
         let prog = match self.parent.prog {
             Some(prog) => prog,
-            None => Err(Error::new(
-                ErrorKind::Other,
+            None => Err(Error::other(
                 "Error: No program set, call prog_set() to load one",
             ))?,
         };
-        self.parent.jit = Some(jit::JitMemory::new(
-            prog,
-            &self.parent.helpers,
-            false,
-            false,
-        )?);
+        #[cfg(feature = "std")]
+        {
+            self.parent.jit = Some(jit::JitMemory::new(
+                prog,
+                &self.parent.helpers,
+                false,
+                false,
+            )?);
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let exec_memory = match self.parent.custom_exec_memory.take() {
+                Some(memory) => memory,
+                None => return Err(Error::new(
+                    ErrorKind::Other,
+                    "Error: No custom executable memory set, call set_jit_exec_memory() to set one",
+                ))?,
+            };
+            self.parent.jit = Some(jit::JitMemory::new(
+                prog,
+                exec_memory,
+                &self.parent.helpers,
+                false,
+                false,
+            )?);
+        }
         Ok(())
     }
 
@@ -1477,7 +1725,7 @@ impl<'a> EbpfVmRaw<'a> {
     ///     assert_eq!(res, 0x22cc);
     /// }
     /// ```
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub unsafe fn execute_program_jit(&self, mem: &'a mut [u8]) -> Result<u64, Error> {
         let mut mbuff = vec![];
         self.parent.execute_program_jit(mem, &mut mbuff)
@@ -1514,7 +1762,7 @@ impl<'a> EbpfVmRaw<'a> {
             ))?,
         };
 
-        let mut compiler = CraneliftCompiler::new(self.parent.helpers.clone());
+        let compiler = CraneliftCompiler::new(self.parent.helpers.clone());
         let program = compiler.compile_function(prog)?;
 
         self.parent.cranelift_prog = Some(program);
@@ -1680,6 +1928,62 @@ impl<'a> EbpfVmNoData<'a> {
         self.parent.set_verifier(verifier)
     }
 
+    /// Set a new stack usage calculator function. The function should return the stack usage
+    /// of the program in bytes. If a program has been loaded to the VM already, the calculator
+    /// is immediately run.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rbpf::lib::{Error, ErrorKind};
+    /// use rbpf::ebpf;
+    /// use core::any::Any;
+    /// // Define a simple stack usage calculator function.
+    /// fn calculator(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16 {
+    ///    // This is a dummy implementation, just for the example.
+    ///    // In a real implementation, you would calculate the stack usage based on the program.
+    ///    // Here we just return a fixed value.
+    ///    16
+    /// }
+    ///
+    /// let prog1 = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    ///
+    /// // Instantiate a VM.
+    /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog1)).unwrap();
+    /// // Change the stack usage calculator.
+    /// vm.set_stack_usage_calculator(calculator, Box::new(())).unwrap();
+    /// ```
+    pub fn set_stack_usage_calculator(
+        &mut self,
+        calculator: StackUsageCalculator,
+        data: Box<dyn Any>,
+    ) -> Result<(), Error> {
+        self.parent.set_stack_usage_calculator(calculator, data)
+    }
+
+    /// Set a custom executable memory for the JIT-compiled program.
+    /// We need this for no_std because we cannot use the default memory allocator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let prog = &[
+    ///     0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r0, 0
+    ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+    /// ];
+    /// let mut vm = rbpf::EbpfVmNoData::new(Some(prog)).unwrap();
+    /// let mut memory = [0u8; 1024];
+    /// // Use mmap or other means to modify the permissions of the memory to be executable.
+    /// vm.set_jit_exec_memory(&mut memory);
+    /// ```
+    #[cfg(all(not(windows), not(feature = "std")))]
+    pub fn set_jit_exec_memory(&mut self, memory: &'a mut [u8]) -> Result<(), Error> {
+        self.parent.set_jit_exec_memory(memory)
+    }
+
     /// Register a built-in or user-defined helper function in order to use it later from within
     /// the eBPF program. The helper is registered into a hashmap, so the `key` can be any `u32`.
     ///
@@ -1735,7 +2039,6 @@ impl<'a> EbpfVmNoData<'a> {
     /// # Examples
     ///
     /// ```
-    /// use std::iter::FromIterator;
     /// use std::ptr::addr_of;
     ///
     /// struct MapValue {
@@ -1751,11 +2054,10 @@ impl<'a> EbpfVmNoData<'a> {
     /// // Instantiate a VM.
     /// let mut vm = rbpf::EbpfVmNoData::new(Some(prog)).unwrap();
     /// let start = addr_of!(VALUE) as u64;
-    /// let addrs = Vec::from_iter(start..start+size_of::<MapValue>() as u64);
-    /// vm.register_allowed_memory(&addrs);
+    /// vm.register_allowed_memory(start..start+size_of::<MapValue>() as u64);
     /// ```
-    pub fn register_allowed_memory(&mut self, allowed: &[u64]) -> () {
-        self.parent.register_allowed_memory(allowed)
+    pub fn register_allowed_memory(&mut self, addrs_range: Range<u64>) {
+        self.parent.register_allowed_memory(addrs_range)
     }
 
     /// JIT-compile the loaded program. No argument required for this.
@@ -1774,10 +2076,9 @@ impl<'a> EbpfVmNoData<'a> {
     ///
     /// let mut vm = rbpf::EbpfVmNoData::new(Some(prog)).unwrap();
     ///
-    ///
     /// vm.jit_compile();
     /// ```
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub fn jit_compile(&mut self) -> Result<(), Error> {
         self.parent.jit_compile()
     }
@@ -1835,7 +2136,7 @@ impl<'a> EbpfVmNoData<'a> {
     ///     assert_eq!(res, 0x1122);
     /// }
     /// ```
-    #[cfg(all(not(windows), feature = "std"))]
+    #[cfg(not(windows))]
     pub unsafe fn execute_program_jit(&self) -> Result<u64, Error> {
         self.parent.execute_program_jit(&mut [])
     }

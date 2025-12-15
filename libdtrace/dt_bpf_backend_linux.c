@@ -423,6 +423,7 @@ static const dt_bpf_backend_ops_t linux_backend_ops = {
 
 	.map_create = linux_map_create,
 	.map_lookup = linux_map_lookup,
+	.map_lookup_ptr = NULL,  /* Not used on Linux - kernel BPF has direct pointers */
 	.map_update = linux_map_update,
 	.map_delete = linux_map_delete,
 	.map_next_key = linux_map_next_key,

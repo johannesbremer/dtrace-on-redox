@@ -116,7 +116,6 @@ pub fn parse(input: &str) -> Result<Vec<Instruction>, String> {
             Err(err) => Err(err.to_string()),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -322,55 +321,60 @@ mod tests {
         // Sample program from ubpf.
         // We could technically indent the instructions since the parser support white spaces at
         // the beginning, but there is another test for that.
-        let src = "\
-ldxb r2, [r1+12]
-ldxb r3, [r1+13]
-lsh r3, 0x8
-or r3, r2
-mov r0, 0x0
-jne r3, 0x8, +37
-ldxb r2, [r1+23]
-jne r2, 0x6, +35
-ldxb r2, [r1+14]
-add r1, 0xe
-and r2, 0xf
-lsh r2, 0x2
-add r1, r2
-mov r0, 0x0
-ldxh r4, [r1+12]
-add r1, 0x14
-rsh r4, 0x2
-and r4, 0x3c
-mov r2, r4
-add r2, 0xffffffec
-mov r5, 0x15
-mov r3, 0x0
-jgt r5, r4, +20
-mov r5, r3
-lsh r5, 0x20
-arsh r5, 0x20
-mov r4, r1
-add r4, r5
-ldxb r5, [r4]
-jeq r5, 0x1, +4
-jeq r5, 0x0, +12
-mov r6, r3
-jeq r5, 0x5, +9
-ja +2
-add r3, 0x1
-mov r6, r3
-ldxb r3, [r4+1]
-add r3, r6
-lsh r3, 0x20
-arsh r3, 0x20
-jsgt r2, r3, -18
-ja +1
-mov r0, 0x1
-exit
-";
+        let src = "
+            ldxb r2, [r1+12]
+            ldxb r3, [r1+13]
+            lsh r3, 0x8
+            or r3, r2
+            mov r0, 0x0
+            jne r3, 0x8, +37
+            ldxb r2, [r1+23]
+            jne r2, 0x6, +35
+            ldxb r2, [r1+14]
+            add r1, 0xe
+            and r2, 0xf
+            lsh r2, 0x2
+            add r1, r2
+            mov r0, 0x0
+            ldxh r4, [r1+12]
+            add r1, 0x14
+            rsh r4, 0x2
+            and r4, 0x3c
+            mov r2, r4
+            add r2, 0xffffffec
+            mov r5, 0x15
+            mov r3, 0x0
+            jgt r5, r4, +20
+            mov r5, r3
+            lsh r5, 0x20
+            arsh r5, 0x20
+            mov r4, r1
+            add r4, r5
+            ldxb r5, [r4]
+            jeq r5, 0x1, +4
+            jeq r5, 0x0, +12
+            mov r6, r3
+            jeq r5, 0x5, +9
+            ja +2
+            add r3, 0x1
+            mov r6, r3
+            ldxb r3, [r4+1]
+            add r3, r6
+            lsh r3, 0x20
+            arsh r3, 0x20
+            jsgt r2, r3, -18
+            ja +1
+            mov r0, 0x1
+            exit
+        "
+        .trim()
+        .lines()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join("\n");
 
         assert_eq!(
-            parse(src),
+            parse(&src),
             Ok(vec![
                 Instruction {
                     name: "ldxb".to_string(),
@@ -586,21 +590,19 @@ exit
     #[test]
     fn test_error_eof() {
         let expected_error;
-        #[cfg(feature = "std")] {
+        #[cfg(feature = "std")]
+        {
             expected_error = Err(
-                "Parse error at line: 1, column: 6\nUnexpected end of input\nExpected digit\n".to_string()
+                "Parse error at line: 1, column: 6\nUnexpected end of input\nExpected digit\n"
+                    .to_string(),
             );
         }
-        #[cfg(not(feature = "std"))] {
-            expected_error = Err(
-                "unexpected parse".to_string()
-            );
+        #[cfg(not(feature = "std"))]
+        {
+            expected_error = Err("unexpected parse".to_string());
         }
         // Unexpected end of input in a register name.
-        assert_eq!(
-            parse("lsh r"),
-            expected_error
-        );
+        assert_eq!(parse("lsh r"), expected_error);
     }
 
     /// When running without `std` the `EasyParser` provided by `combine`
@@ -609,21 +611,18 @@ exit
     #[test]
     fn test_error_unexpected_character() {
         let expected_error;
-        #[cfg(feature = "std")] {
+        #[cfg(feature = "std")]
+        {
             expected_error = Err(
                 "Parse error at line: 2, column: 1\nUnexpected `^`\nExpected letter or digit, whitespaces, `r`, `-`, `+`, `[` or end of input\n".to_string()
             );
         }
-        #[cfg(not(feature = "std"))] {
-            expected_error = Err(
-                "unexpected parse".to_string()
-            );
+        #[cfg(not(feature = "std"))]
+        {
+            expected_error = Err("unexpected parse".to_string());
         }
         // Unexpected character at end of input.
-        assert_eq!(
-            parse("exit\n^"),
-            expected_error
-        );
+        assert_eq!(parse("exit\n^"), expected_error);
     }
 
     #[test]

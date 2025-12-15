@@ -18,6 +18,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -39,11 +40,191 @@
 #define BPF_FUNC_get_current_pid_tgid	14
 #define BPF_FUNC_get_current_uid_gid	15
 #define BPF_FUNC_get_current_comm	16
+#define BPF_FUNC_perf_event_output	25
 #define BPF_FUNC_probe_read_str		45
 #define BPF_FUNC_probe_read_user	112
 #define BPF_FUNC_probe_read_kernel	113
 #define BPF_FUNC_probe_read_user_str	114
 #define BPF_FUNC_probe_read_kernel_str	115
+
+/*
+ * User-space perf ring buffer for Redox.
+ *
+ * This simulates the Linux perf_event ring buffer format so that
+ * dtrace_consume() can process output using the existing code paths.
+ *
+ * The buffer format matches what the kernel would produce:
+ *   struct perf_event_header { type, misc, size }
+ *   uint32_t data_size
+ *   char data[data_size]
+ */
+#define REDOX_PERF_BUF_SIZE	(256 * 1024)  /* 256KB buffer */
+
+static struct {
+	/* Simulated perf_event_mmap_page header */
+	uint64_t	data_head;	/* Updated by writer (us) */
+	uint64_t	data_tail;	/* Updated by reader (consume) */
+	/* Ring buffer data follows */
+	char		data[REDOX_PERF_BUF_SIZE];
+} redox_perf_buf;
+
+/* perf_event_header types */
+#define PERF_RECORD_SAMPLE	9
+
+/* Simulated perf_event_header - matches Linux */
+struct redox_perf_event_header {
+	uint32_t	type;
+	uint16_t	misc;
+	uint16_t	size;
+};
+
+/*
+ * Write data to the user-space perf ring buffer.
+ * Returns 0 on success, -1 on failure (buffer full).
+ */
+static int
+redox_perf_write(const void *data, size_t size)
+{
+	struct redox_perf_event_header hdr;
+	uint32_t record_size;
+	uint64_t head, tail, avail;
+	char *dst;
+
+	/* Total record size: header + data (no alignment needed for user-space) */
+	record_size = sizeof(hdr) + size;
+
+	head = redox_perf_buf.data_head;
+	tail = redox_perf_buf.data_tail;
+
+	/* Check available space */
+	avail = REDOX_PERF_BUF_SIZE - (head - tail);
+	if (record_size > avail) {
+		fprintf(stderr, "redox_perf_write: buffer full (need %u, have %lu)\n",
+			record_size, (unsigned long)avail);
+		return -1;
+	}
+
+	/* Write header */
+	hdr.type = PERF_RECORD_SAMPLE;
+	hdr.misc = 0;
+	hdr.size = record_size;
+
+	dst = redox_perf_buf.data + (head % REDOX_PERF_BUF_SIZE);
+
+	/* Handle wrap-around (simplified: assume no wrap for now) */
+	if (head % REDOX_PERF_BUF_SIZE + record_size > REDOX_PERF_BUF_SIZE) {
+		/* Would wrap - for simplicity, fail (shouldn't happen often) */
+		fprintf(stderr, "redox_perf_write: would wrap, skipping\n");
+		return -1;
+	}
+
+	memcpy(dst, &hdr, sizeof(hdr));
+	memcpy(dst + sizeof(hdr), data, size);
+
+	/* Memory barrier to ensure writes complete before updating head */
+	__sync_synchronize();
+
+	redox_perf_buf.data_head = head + record_size;
+
+	return 0;
+}
+
+/*
+ * Get the simulated perf buffer base address for dt_peb initialization.
+ */
+void *
+dt_redox_perf_buf_base(void)
+{
+	return &redox_perf_buf;
+}
+
+size_t
+dt_redox_perf_buf_data_size(void)
+{
+	return REDOX_PERF_BUF_SIZE;
+}
+
+/*
+ * Helper: bpf_map_lookup_elem
+ *
+ * Looks up a key in a BPF map and returns a pointer to the value.
+ * In rbpf, we return the actual value pointer from our user-space maps.
+ */
+static uint64_t
+helper_map_lookup_elem(uint64_t map_fd, uint64_t key_ptr, uint64_t arg2,
+		       uint64_t arg3, uint64_t arg4)
+{
+	void *value_ptr;
+	uint32_t key;
+
+	(void)arg2;
+	(void)arg3;
+	(void)arg4;
+
+	if (dt_bpf_backend == NULL || dt_bpf_backend->map_lookup_ptr == NULL) {
+		return 0;  /* NULL pointer */
+	}
+
+	if (key_ptr == 0) {
+		return 0;
+	}
+
+	/* The key_ptr is a pointer in BPF memory - dereference it to get actual key */
+	key = *(uint32_t *)(uintptr_t)key_ptr;
+
+	/* Get a direct pointer to the map value (not a copy) */
+	value_ptr = dt_bpf_backend->map_lookup_ptr((dt_bpf_map_t)map_fd, &key);
+
+	return (uint64_t)(uintptr_t)value_ptr;
+}
+
+/*
+ * Helper: bpf_map_update_elem
+ *
+ * Updates a value in a BPF map.
+ */
+static uint64_t
+helper_map_update_elem(uint64_t map_fd, uint64_t key_ptr, uint64_t value_ptr,
+		       uint64_t flags, uint64_t arg4)
+{
+	uint32_t key;
+	uint32_t val32;
+	int rc;
+
+	(void)arg4;
+
+	key = *(uint32_t *)(uintptr_t)key_ptr;
+	val32 = *(uint32_t *)(uintptr_t)value_ptr;
+
+	if (dt_bpf_backend == NULL || dt_bpf_backend->map_update == NULL)
+		return (uint64_t)-1;
+
+	rc = dt_bpf_backend->map_update((dt_bpf_map_t)map_fd,
+					&key,
+					(const void *)(uintptr_t)value_ptr,
+					(uint32_t)flags);
+	return (uint64_t)rc;
+}
+
+/*
+ * Helper: bpf_map_delete_elem
+ *
+ * Deletes a key from a BPF map.
+ */
+static uint64_t
+helper_map_delete_elem(uint64_t map_fd, uint64_t key_ptr, uint64_t arg2,
+		       uint64_t arg3, uint64_t arg4)
+{
+	(void)arg2;
+	(void)arg3;
+	(void)arg4;
+
+	if (dt_bpf_backend == NULL || dt_bpf_backend->map_delete == NULL)
+		return (uint64_t)-1;
+
+	return (uint64_t)dt_bpf_backend->map_delete((dt_bpf_map_t)map_fd,
+						    (const void *)(uintptr_t)key_ptr);
+}
 
 /*
  * Helper: bpf_probe_read
@@ -143,6 +324,7 @@ helper_get_current_pid_tgid(uint64_t arg0, uint64_t arg1, uint64_t arg2,
 			    uint64_t arg3, uint64_t arg4)
 {
 	pid_t pid;
+	uint64_t result;
 
 	(void)arg0;
 	(void)arg1;
@@ -230,6 +412,67 @@ helper_probe_read_str(uint64_t dst, uint64_t size, uint64_t src,
 }
 
 /*
+ * Helper: bpf_perf_event_output
+ *
+ * Output data to a perf event buffer.
+ *
+ * The data coming in has this format (from BPF epilogue):
+ *   bytes 0-3:  SPECID
+ *   bytes 4-7:  PRID (probe ID)
+ *   bytes 8-11: STID (statement ID)
+ *   bytes 12+:  Trace data (record descriptors + data)
+ *
+ * We prepend a uint32_t size field (as Linux perf does) and write to
+ * the user-space ring buffer in the format dtrace_consume() expects:
+ *   struct perf_event_header { type=SAMPLE, misc=0, size }
+ *   uint32_t size  <- size of remaining data
+ *   char data[]    <- SPECID, PRID, STID, trace data
+ *
+ * Args:
+ *   ctx   - BPF context (ignored)
+ *   map   - perf event map fd (ignored - we use our buffer)
+ *   flags - flags (ignored)
+ *   data  - pointer to data (SPECID, PRID, STID, trace data)
+ *   size  - size of data
+ */
+static uint64_t
+helper_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
+			 uint64_t data, uint64_t size)
+{
+	char output_buf[4096];
+	uint32_t *size_ptr;
+	int rc;
+
+	(void)ctx;
+	(void)map;
+	(void)flags;
+
+	if (data == 0 || size == 0)
+		return 0;
+
+	/* Safety check */
+	if (size > sizeof(output_buf) - 4) {
+		fprintf(stderr, "perf_event_output: data too large (%lu > %zu)\n",
+			(unsigned long)size, sizeof(output_buf) - 4);
+		return -1;
+	}
+
+	/*
+	 * Build the output record:
+	 *   uint32_t size  <- size of following data
+	 *   char data[]    <- the actual trace data
+	 */
+	size_ptr = (uint32_t *)output_buf;
+	*size_ptr = (uint32_t)size;
+	memcpy(output_buf + 4, (void *)(uintptr_t)data, size);
+
+	/* Write to our ring buffer */
+	rc = redox_perf_write(output_buf, size + 4);
+
+	return rc < 0 ? (uint64_t)-1 : 0;
+}
+
+/*
  * Helper: bpf_trace_printk
  *
  * Debug printf - just returns 0 in user-space for now.
@@ -264,6 +507,17 @@ dt_bpf_register_rbpf_helpers(void)
 
 	/* Register helpers */
 	if (dt_bpf_backend->register_helper != NULL) {
+		/* Map operations - critical for BPF programs */
+		rc |= dt_bpf_backend->register_helper(
+			BPF_FUNC_map_lookup_elem,
+			(dt_bpf_helper_fn)helper_map_lookup_elem);
+		rc |= dt_bpf_backend->register_helper(
+			BPF_FUNC_map_update_elem,
+			(dt_bpf_helper_fn)helper_map_update_elem);
+		rc |= dt_bpf_backend->register_helper(
+			BPF_FUNC_map_delete_elem,
+			(dt_bpf_helper_fn)helper_map_delete_elem);
+
 		rc |= dt_bpf_backend->register_helper(
 			BPF_FUNC_probe_read,
 			(dt_bpf_helper_fn)helper_probe_read);
@@ -291,6 +545,9 @@ dt_bpf_register_rbpf_helpers(void)
 		rc |= dt_bpf_backend->register_helper(
 			BPF_FUNC_trace_printk,
 			(dt_bpf_helper_fn)helper_trace_printk);
+		rc |= dt_bpf_backend->register_helper(
+			BPF_FUNC_perf_event_output,
+			(dt_bpf_helper_fn)helper_perf_event_output);
 
 		/* User/kernel read variants - same as probe_read in user-space */
 		rc |= dt_bpf_backend->register_helper(

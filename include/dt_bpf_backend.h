@@ -127,6 +127,7 @@ typedef struct dt_bpf_backend_ops {
 				   uint32_t key_size, uint32_t value_size,
 				   uint32_t max_entries, uint32_t flags);
 	int (*map_lookup)(dt_bpf_map_t map, const void *key, void *value);
+	void *(*map_lookup_ptr)(dt_bpf_map_t map, const void *key);
 	int (*map_update)(dt_bpf_map_t map, const void *key, const void *value,
 			  uint32_t flags);
 	int (*map_delete)(dt_bpf_map_t map, const void *key);

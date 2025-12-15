@@ -112,6 +112,27 @@ pub unsafe extern "C" fn rbpf_vm_register_helper(
     }
 }
 
+/// Allow all memory access in the VM
+///
+/// This disables memory bounds checking, which is useful for DTrace
+/// where helpers return pointers to user-space memory that we trust.
+///
+/// # Safety
+/// The caller must ensure that `vm` is a valid pointer returned by `rbpf_vm_new`.
+#[no_mangle]
+pub unsafe extern "C" fn rbpf_vm_allow_all_memory(vm: *mut c_void) -> i32 {
+    if vm.is_null() {
+        return -1;
+    }
+
+    let wrapper = &mut *(vm as *mut RbpfVmWrapper);
+
+    // Register a wide memory range as allowed
+    // This effectively disables bounds checking for helper-returned pointers
+    wrapper.vm.register_allowed_memory(0..u64::MAX);
+    0
+}
+
 /// Execute the BPF program using the interpreter
 ///
 /// # Safety
@@ -138,7 +159,10 @@ pub unsafe extern "C" fn rbpf_vm_exec(
 
     match wrapper.vm.execute_program(mem_slice) {
         Ok(result) => result,
-        Err(_) => u64::MAX,
+        Err(e) => {
+            eprintln!("rbpf_vm_exec error: {:?}", e);
+            u64::MAX
+        }
     }
 }
 

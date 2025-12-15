@@ -1282,6 +1282,7 @@ dt_bpf_gmap_create(dtrace_hdl_t *dtp)
 
 /*
  * Perform relocation processing for BPF maps in a program.
+ * Note: Function call relocations are handled by dt_link_resolve().
  */
 static void
 dt_bpf_reloc_prog(dtrace_hdl_t *dtp, const dtrace_difo_t *dp)
@@ -1543,7 +1544,17 @@ dt_bpf_load_progs(dtrace_hdl_t *dtp, uint_t cflags)
 		if (prp->prov->impl->attach)
 			rc = prp->prov->impl->attach(dtp, prp, fd);
 
+#ifdef __redox__
+		/*
+		 * On Redox, the attach function may have saved the fd for
+		 * later execution (e.g., BEGIN/END probes).  Don't close
+		 * the fd if it was saved to dt_begin_prog or dt_end_prog.
+		 */
+		if (fd != dtp->dt_begin_prog && fd != dtp->dt_end_prog)
+			close(fd);
+#else
 		close(fd);
+#endif
 		if (rc < 0 && !(prp->flags & DT_PROBE_FLAG_OPTIONAL)) {
 			dt_attach_error(dtp, rc,
 					prp->desc->prv, prp->desc->mod,

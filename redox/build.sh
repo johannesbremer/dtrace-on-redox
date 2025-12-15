@@ -188,12 +188,20 @@ if [ -f "$RBPF_FFI_DIR/Cargo.toml" ]; then
     cp -r "$RBPF_FFI_DIR"/* "$BUILD/rbpf_ffi/"
     cd "$BUILD/rbpf_ffi"
     
-    if cargo build --release --target x86_64-unknown-redox --features no-jit 2>&1; then
+    echo "  Running: cargo build --release --target x86_64-unknown-redox --features std,no-jit"
+    if cargo build --release --target x86_64-unknown-redox --features std,no-jit 2>&1 | tee /tmp/cargo_build.log; then
         echo "  Rust library built successfully"
+        ls -la target/x86_64-unknown-redox/release/*.a 2>&1 || echo "  No .a files found!"
         cp "target/x86_64-unknown-redox/release/librbpf_ffi.a" "$BUILD/obj/" 2>/dev/null || true
-        HAVE_RBPF=1
+        if [ -f "$BUILD/obj/librbpf_ffi.a" ]; then
+            echo "  Library copied to $BUILD/obj/"
+            HAVE_RBPF=1
+        else
+            echo "  WARNING: Library copy failed"
+        fi
     else
-        echo "  Rust build failed, will use stubs"
+        echo "  Rust build failed, showing last 30 lines:"
+        tail -30 /tmp/cargo_build.log
     fi
     cd "$BUILD"
 fi
@@ -209,6 +217,7 @@ if [ "$HAVE_RBPF" = "0" ]; then
         echo 'uint64_t rbpf_vm_exec(void *vm, const uint8_t *mem, size_t mem_len) { (void)vm; (void)mem; (void)mem_len; return 0; }'
         echo 'int rbpf_vm_jit_compile(void *vm) { (void)vm; return -1; }'
         echo 'uint64_t rbpf_vm_exec_jit(void *vm, const uint8_t *mem, size_t mem_len) { (void)vm; (void)mem; (void)mem_len; return 0; }'
+        echo 'int rbpf_vm_allow_all_memory(void *vm) { (void)vm; return 0; }'
     } > "$BUILD/rbpf_stubs.c"
     compile_file "$BUILD/rbpf_stubs.c" "$BUILD/obj/rbpf_stubs.o"
 fi
@@ -269,7 +278,7 @@ done
 # Note: dt_link.c excluded - ELF/DOF linking not needed on Redox
 for src in dt_open.c dt_cc.c dt_cg.c dt_as.c dt_decl.c dt_xlator.c \
            dt_module.c dt_program.c dt_probe.c dt_bpf.c \
-           dt_aggregate.c dt_consume.c dt_pid.c \
+           dt_aggregate.c dt_consume.c dt_pid.c dt_peb.c \
            dt_parser.c dt_dlibs.c dt_stubs_redox.c dt_regset.c \
            dt_pcb.c dt_rodata.c dt_dis.c; do
     if [ -f "${SRC}/libdtrace/$src" ]; then

@@ -126,6 +126,15 @@ dt_dlib_init(dtrace_hdl_t *dtp)
 {
 	dtp->dt_bpfsyms = dt_idhash_create("BPF symbols", dt_bpf_symbols,
 					   1000, UINT_MAX);
+
+#ifdef __redox__
+	/*
+	 * On Redox, we don't have bpf_dlib.o, so we register stub
+	 * implementations of the BPF library functions directly.
+	 */
+	extern void dt_dlib_init_redox(dtrace_hdl_t *dtp);
+	dt_dlib_init_redox(dtp);
+#endif
 }
 
 /*

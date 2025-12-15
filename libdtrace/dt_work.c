@@ -109,6 +109,21 @@ dtrace_status(dtrace_hdl_t *dtp)
 	if (dtp->dt_stopped)
 		return DTRACE_STATUS_STOPPED;
 
+#ifdef __redox__
+	/*
+	 * On RedoxOS, always check activity state since we execute
+	 * BPF programs synchronously and state changes immediately.
+	 */
+	{
+		dt_activity_t act = dt_state_get_activity(dtp);
+		if (act == DT_ACTIVITY_DRAINING) {
+			if (!dtp->dt_stopped)
+				dtrace_stop(dtp);
+			return DTRACE_STATUS_EXITED;
+		}
+	}
+#endif
+
 	if (dtp->dt_laststatus != 0) {
 		if (now - dtp->dt_laststatus < interval)
 			return DTRACE_STATUS_NONE;
@@ -300,11 +315,13 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 		return dt_set_errno(dtp, EDT_NOMEM);
 #elif defined(__redox__)
 	/*
-	 * On RedoxOS, we use BPF maps for output instead of perf buffers.
-	 * The dt_pebs_init is skipped - output comes from BPF maps.
+	 * On RedoxOS, we use a user-space ring buffer that mimics Linux
+	 * perf buffers.  Initialize it here.
 	 */
 	if (size == 0 || size < dtp->dt_maxreclen)
 		return dt_set_errno(dtp, EDT_BUFTOOSMALL);
+	if (dt_pebs_init(dtp, size) == -1)
+		return dt_set_errno(dtp, EDT_NOMEM);
 #endif
 
 	/*
@@ -339,10 +356,21 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 		BEGIN_probe();
 #elif defined(__redox__)
 	/*
-	 * On RedoxOS, fire BEGIN probe directly.
-	 * CPU affinity is not supported in self-trace mode.
+	 * On RedoxOS, execute the BEGIN probe's BPF program directly
+	 * using the rbpf backend.  The program expects a context pointer
+	 * as input (normally pt_regs from uprobes, but BEGIN doesn't use it).
+	 *
+	 * The BEGIN probe expects activity state to be INACTIVE.
+	 * It will set it to ACTIVE upon successful execution, or
+	 * DRAINING if exit() was called.
 	 */
-	BEGIN_probe();
+	dt_state_set_activity(dtp, DT_ACTIVITY_INACTIVE);
+	if (dtp->dt_begin_prog >= 0 && dt_bpf_backend != NULL &&
+	    dt_bpf_backend->prog_exec != NULL) {
+		uint64_t dummy_ctx[16] = {0};  /* Minimal context for BEGIN */
+		dt_bpf_backend->prog_exec(dtp->dt_begin_prog,
+					  dummy_ctx, sizeof(dummy_ctx));
+	}
 #endif
 
 	dtp->dt_active = 1;
@@ -353,8 +381,9 @@ dtrace_go(dtrace_hdl_t *dtp, uint_t cflags)
 	 * activity state to become STOPPED once the BEGIN probe is done.  We
 	 * need to move it back to DRAINING in that case.
 	 */
-	if (dt_state_get_activity(dtp) == DT_ACTIVITY_STOPPED)
+	if (dt_state_get_activity(dtp) == DT_ACTIVITY_STOPPED) {
 		dt_state_set_activity(dtp, DT_ACTIVITY_DRAINING);
+	}
 
 	return 0;
 }
@@ -394,9 +423,15 @@ dtrace_stop(dtrace_hdl_t *dtp)
 		END_probe();
 #elif defined(__redox__)
 	/*
-	 * On RedoxOS, fire END probe directly.
+	 * On RedoxOS, execute the END probe's BPF program directly
+	 * using the rbpf backend.
 	 */
-	END_probe();
+	if (dtp->dt_end_prog >= 0 && dt_bpf_backend != NULL &&
+	    dt_bpf_backend->prog_exec != NULL) {
+		uint64_t dummy_ctx[16] = {0};  /* Minimal context for END */
+		(void)dt_bpf_backend->prog_exec(dtp->dt_end_prog,
+						dummy_ctx, sizeof(dummy_ctx));
+	}
 #endif
 
 	dtp->dt_stopped = 1;

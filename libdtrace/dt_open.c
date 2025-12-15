@@ -730,6 +730,10 @@ dt_vopen(int version, int flags, int *errp,
 	strcpy(dtp->dt_uts.release, "1.0.0");
 	strcpy(dtp->dt_uts.version, "1.0.0");
 	strcpy(dtp->dt_uts.machine, "x86_64");
+
+	/* Initialize Redox-specific program handles to invalid */
+	dtp->dt_begin_prog = -1;
+	dtp->dt_end_prog = -1;
 #else
 	uname(&dtp->dt_uts);
 #endif

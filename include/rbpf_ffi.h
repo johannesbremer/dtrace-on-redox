@@ -81,6 +81,17 @@ int rbpf_vm_jit_compile(void *vm);
 uint64_t rbpf_vm_exec_jit(void *vm, const uint8_t *mem, size_t mem_len);
 
 /**
+ * Allow all memory access in the VM.
+ *
+ * This disables memory bounds checking, which is useful for DTrace
+ * where helpers return pointers to user-space memory that we trust.
+ *
+ * @param vm  VM instance
+ * @return    0 on success, -1 on error
+ */
+int rbpf_vm_allow_all_memory(void *vm);
+
+/**
  * Disassemble eBPF bytecode to human-readable format.
  *
  * @param prog      Pointer to eBPF bytecode

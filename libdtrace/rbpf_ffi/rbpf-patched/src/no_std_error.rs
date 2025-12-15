@@ -40,3 +40,10 @@ pub enum ErrorKind {
     Other,
 }
 
+impl Error {
+    /// Convenience function to create an `Other` kind error.
+    #[allow(dead_code)]
+    pub fn other<S: Into<String>>(error: S) -> Error {
+        Error::new(ErrorKind::Other, error)
+    }
+}

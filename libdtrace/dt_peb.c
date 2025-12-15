@@ -18,10 +18,6 @@
 #include <dt_bpf.h>
 #include <dt_peb.h>
 
-#ifdef __redox__
-#include <config_redox.h>
-#endif
-
 #if defined(__linux__)
 /*
  * Find last set bit in a 64-bit value.
@@ -142,8 +138,19 @@ dt_pebs_exit(dtrace_hdl_t *dtp)
 	dt_free(dtp, dtp->dt_pebset);
 
 	dtp->dt_pebset = NULL;
+#elif defined(__redox__)
+	/*
+	 * On Redox, the buffer memory is statically allocated, so we just
+	 * free the tracking structures.
+	 */
+	if (dtp->dt_pebset == NULL)
+		return;
+
+	dt_free(dtp, dtp->dt_pebset->pebs);
+	dt_free(dtp, dtp->dt_pebset);
+	dtp->dt_pebset = NULL;
 #else
-	/* On non-Linux platforms, perf buffers are not used */
+	/* On other platforms, perf buffers are not used */
 	(void)dtp;
 #endif
 }
@@ -258,12 +265,47 @@ fail:
 	return -1;
 #elif defined(__redox__)
 	/*
-	 * On RedoxOS, perf event buffers are not available.
-	 * Output is handled via BPF maps with the rbpf backend.
-	 * This function is a no-op - output collection happens differently.
+	 * On RedoxOS, we use a user-space ring buffer that mimics the
+	 * Linux perf event buffer format.  This allows dtrace_consume()
+	 * to use the same code paths for processing output.
 	 */
-	(void)dtp;
+	dt_peb_t	*pebs;
+	extern void *dt_redox_perf_buf_base(void);
+	extern size_t dt_redox_perf_buf_data_size(void);
+
 	(void)bufsize;
+
+	/*
+	 * Allocate the perf event buffer set.
+	 */
+	dtp->dt_pebset = dt_zalloc(dtp, sizeof(dt_pebset_t));
+	if (dtp->dt_pebset == NULL)
+		return -ENOMEM;
+
+	/*
+	 * Allocate one perf event buffer (we only use CPU 0 in user-space).
+	 */
+	pebs = dt_calloc(dtp, 1, sizeof(struct dt_peb));
+	if (pebs == NULL) {
+		dt_free(dtp, dtp->dt_pebset);
+		return -ENOMEM;
+	}
+
+	dtp->dt_pebset->pebs = pebs;
+	dtp->dt_pebset->page_size = sizeof(uint64_t) * 2;  /* data_head + data_tail */
+	dtp->dt_pebset->data_size = dt_redox_perf_buf_data_size();
+
+	/*
+	 * Set up the single buffer to point to our user-space ring buffer.
+	 */
+	pebs[0].dtp = dtp;
+	pebs[0].cpu = 0;
+	pebs[0].fd = 0;  /* Not used on Redox */
+	pebs[0].base = (char *)dt_redox_perf_buf_base();
+	pebs[0].endp = pebs[0].base + dtp->dt_pebset->page_size +
+		       dtp->dt_pebset->data_size - 1;
+	pebs[0].last_head = 0;
+
 	return 0;
 #else
 	/* Unsupported platform */

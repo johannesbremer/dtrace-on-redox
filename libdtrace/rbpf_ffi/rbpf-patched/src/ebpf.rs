@@ -14,8 +14,10 @@
 //! <https://www.kernel.org/doc/Documentation/networking/filter.txt>, or for a shorter version of
 //! the list of the operation codes: <https://github.com/iovisor/bpf-docs/blob/master/eBPF.md>
 
-use byteorder::{ByteOrder, LittleEndian};
+#![cfg_attr(rustfmt, rustfmt_skip)]
+
 use crate::lib::*;
+use byteorder::{ByteOrder, LittleEndian};
 
 /// Maximum number of instructions in an eBPF program.
 pub const PROG_MAX_INSNS: usize = 1000000;
@@ -25,6 +27,10 @@ pub const INSN_SIZE: usize = 8;
 pub const PROG_MAX_SIZE: usize = PROG_MAX_INSNS * INSN_SIZE;
 /// Stack for the eBPF stack, in bytes.
 pub const STACK_SIZE: usize = 512;
+/// The default stack size for the eBPF program if there is some eBPF to eBPF calls.
+pub const LOCAL_FUNCTION_STACK_SIZE: u16 = 256;
+/// Maximum number of eBPF to eBPF call depth.
+pub const MAX_CALL_DEPTH: usize = 8;
 
 // eBPF op codes.
 // See also https://www.kernel.org/doc/Documentation/networking/filter.txt
@@ -173,8 +179,6 @@ pub const LD_IND_W   : u8 = BPF_LD    | BPF_IND | BPF_W;
 /// BPF opcode: `ldinddw src, dst, imm`.
 pub const LD_IND_DW  : u8 = BPF_LD    | BPF_IND | BPF_DW;
 
-#[allow(unknown_lints)]
-#[allow(clippy::eq_op)]
 /// BPF opcode: `lddw dst, imm` /// `dst = imm`.
 pub const LD_DW_IMM  : u8 = BPF_LD    | BPF_IMM | BPF_DW;
 /// BPF opcode: `ldxb dst, [src + off]` /// `dst = (src + off) as u8`.
@@ -469,7 +473,7 @@ impl Insn {
     /// };
     /// assert_eq!(insn.to_array(), prog);
     /// ```
-    pub fn to_array(&self) -> [u8;INSN_SIZE] {
+    pub fn to_array(&self) -> [u8; INSN_SIZE] {
         [
             self.opc,
             self.src.wrapping_shl(4) | self.dst,
@@ -552,15 +556,18 @@ pub fn get_insn(prog: &[u8], idx: usize) -> Insn {
     // size, and indexes should be fine in the interpreter/JIT. But this function is publicly
     // available and user can call it with any `idx`, so we have to check anyway.
     if (idx + 1) * INSN_SIZE > prog.len() {
-        panic!("Error: cannot reach instruction at index {:?} in program containing {:?} bytes",
-               idx, prog.len());
+        panic!(
+            "Error: cannot reach instruction at index {:?} in program containing {:?} bytes",
+            idx,
+            prog.len()
+        );
     }
     Insn {
-        opc:  prog[INSN_SIZE * idx],
-        dst:  prog[INSN_SIZE * idx + 1] & 0x0f,
+        opc: prog[INSN_SIZE * idx],
+        dst: prog[INSN_SIZE * idx + 1] & 0x0f,
         src: (prog[INSN_SIZE * idx + 1] & 0xf0) >> 4,
-        off: LittleEndian::read_i16(&prog[(INSN_SIZE * idx + 2) .. ]),
-        imm: LittleEndian::read_i32(&prog[(INSN_SIZE * idx + 4) .. ]),
+        off: LittleEndian::read_i16(&prog[(INSN_SIZE * idx + 2)..]),
+        imm: LittleEndian::read_i32(&prog[(INSN_SIZE * idx + 4)..]),
     }
 }
 
@@ -609,18 +616,19 @@ pub fn get_insn(prog: &[u8], idx: usize) -> Insn {
 /// ]);
 /// ```
 pub fn to_insn_vec(prog: &[u8]) -> Vec<Insn> {
-    if prog.len() % INSN_SIZE != 0 {
-        panic!("Error: eBPF program length must be a multiple of {:?} octets",
-               INSN_SIZE);
+    if !prog.len().is_multiple_of(INSN_SIZE) {
+        panic!(
+            "Error: eBPF program length must be a multiple of {INSN_SIZE:?} octets"
+        );
     }
 
     let mut res = vec![];
-    let mut insn_ptr:usize = 0;
+    let mut insn_ptr: usize = 0;
 
     while insn_ptr * INSN_SIZE < prog.len() {
         let insn = get_insn(prog, insn_ptr);
         res.push(insn);
         insn_ptr += 1;
-    };
+    }
     res
 }

@@ -5,16 +5,16 @@
 // Copyright 2016 6WIND S.A. <quentin.monnet@6wind.com>
 //      (Translation to Rust, MetaBuff addition)
 
-use std::mem;
-use std::collections::HashMap;
-use std::fmt::Formatter;
+#![allow(clippy::single_match)]
+
+use crate::{ebpf, format, vec, Error, HashMap, Vec};
+#[cfg(not(feature = "std"))]
+use crate::ErrorKind;
 use std::fmt::Error as FormatterError;
-use std::io::{Error, ErrorKind};
+use std::fmt::Formatter;
+use std::mem;
 use std::ops::{Index, IndexMut};
-
-use ebpf;
-
-extern crate libc;
+use std::ptr;
 
 type MachineCode = unsafe fn(*mut u8, usize, *mut u8, usize, usize, usize) -> u64;
 
@@ -29,7 +29,7 @@ const TARGET_PC_EXIT: isize = TARGET_OFFSET + 1;
 
 #[derive(Copy, Clone)]
 enum OperandSize {
-    S8  = 8,
+    S8 = 8,
     S16 = 16,
     S32 = 32,
     S64 = 64,
@@ -44,8 +44,8 @@ const RSP: u8 = 4;
 const RBP: u8 = 5;
 const RSI: u8 = 6;
 const RDI: u8 = 7;
-const R8:  u8 = 8;
-const R9:  u8 = 9;
+const R8: u8 = 8;
+const R9: u8 = 9;
 const R10: u8 = 10;
 const R11: u8 = 11;
 //const R12: u8 = 12;
@@ -54,7 +54,7 @@ const R14: u8 = 14;
 const R15: u8 = 15;
 
 const REGISTER_MAP_SIZE: usize = 11;
-const REGISTER_MAP: [u8;REGISTER_MAP_SIZE] = [
+const REGISTER_MAP: [u8; REGISTER_MAP_SIZE] = [
     RAX, // 0  return value
     RDI, // 1  arg 1
     RSI, // 2  arg 2
@@ -66,8 +66,8 @@ const REGISTER_MAP: [u8;REGISTER_MAP_SIZE] = [
     R14, // 8  callee-saved
     R15, // 9  callee-saved
     RBP, // 10 stack pointer
-    // R10 and R11 are used to compute store a constant pointer to mem and to compute offset for
-    // LD_ABS_* and LD_IND_* operations, so they are not mapped to any eBPF register.
+         // R10 and R11 are used to compute store a constant pointer to mem and to compute offset for
+         // LD_ABS_* and LD_IND_* operations, so they are not mapped to any eBPF register.
 ];
 
 // Return the x86 register for the given eBPF register
@@ -81,31 +81,31 @@ macro_rules! emit_bytes {
         let size = mem::size_of::<$t>() as usize;
         assert!($mem.offset + size <= $mem.contents.len());
         unsafe {
-            let mut ptr = $mem.contents.as_ptr().add($mem.offset) as *mut $t;
+            let ptr = $mem.contents.as_ptr().add($mem.offset) as *mut $t;
             ptr.write_unaligned($data);
         }
         $mem.offset += size;
-    }}
+    }};
 }
 
 #[derive(Debug)]
 struct Jump {
     offset_loc: usize,
-    target_pc:  isize,
+    target_pc: isize,
 }
 
 #[derive(Debug)]
 struct JitCompiler {
-    pc_locs:         Vec<usize>,
+    pc_locs: Vec<usize>,
     special_targets: HashMap<isize, usize>,
-    jumps:           Vec<Jump>,
+    jumps: Vec<Jump>,
 }
 
 impl JitCompiler {
     fn new() -> JitCompiler {
         JitCompiler {
-            pc_locs:         vec![],
-            jumps:           vec![],
+            pc_locs: vec![],
+            jumps: vec![],
             special_targets: HashMap::new(),
         }
     }
@@ -163,10 +163,10 @@ impl JitCompiler {
     // Skipped if no bits would be set.
     fn emit_basic_rex(&self, mem: &mut JitMemory, w: u8, src: u8, dst: u8) {
         if self.basix_rex_would_set_bits(w, src, dst) {
-            let is_masked = | val, mask | { match val & mask {
+            let is_masked = |val, mask| match val & mask {
                 0 => 0,
-                _ => 1
-            }};
+                _ => 1,
+            };
             self.emit_rex(mem, w, is_masked(src, 8), 0, is_masked(dst, 8));
         }
     }
@@ -248,7 +248,7 @@ impl JitCompiler {
     fn emit_load(&self, mem: &mut JitMemory, size: OperandSize, src: u8, dst: u8, offset: i32) {
         let data = match size {
             OperandSize::S64 => 1,
-            _ => 0
+            _ => 0,
         };
         self.emit_basic_rex(mem, data, dst, src);
 
@@ -257,12 +257,12 @@ impl JitCompiler {
                 // movzx
                 self.emit1(mem, 0x0f);
                 self.emit1(mem, 0xb6);
-            },
+            }
             OperandSize::S16 => {
                 // movzx
                 self.emit1(mem, 0x0f);
                 self.emit1(mem, 0xb7);
-            },
+            }
             OperandSize::S32 | OperandSize::S64 => {
                 // mov
                 self.emit1(mem, 0x8b);
@@ -274,7 +274,7 @@ impl JitCompiler {
 
     // Load sign-extended immediate into register
     fn emit_load_imm(&self, mem: &mut JitMemory, dst: u8, imm: i64) {
-        if imm >= std::i32::MIN as i64 && imm <= std::i32::MAX as i64 {
+        if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
             self.emit_alu64_imm32(mem, 0xc7, 0, dst, imm as i32);
         } else {
             // movabs $imm,dst
@@ -285,6 +285,7 @@ impl JitCompiler {
     }
 
     // Store register src to [dst + offset]
+    #[rustfmt::skip]
     fn emit_store(&self, mem: &mut JitMemory, size: OperandSize, src: u8, dst: u8, offset: i32) {
         match size {
             OperandSize::S16 => self.emit1(mem, 0x66), // 16-bit override
@@ -305,13 +306,14 @@ impl JitCompiler {
             self.emit_rex(mem, rexw, is_masked(src, 8), 0, is_masked(dst, 8));
         }
         match size {
-            OperandSize::S8 => self.emit1(mem, 0x88),
-            _               => self.emit1(mem, 0x89),
+            OperandSize::S8  => self.emit1(mem, 0x88),
+            _                => self.emit1(mem, 0x89),
         };
         self.emit_modrm_and_displacement(mem, src, dst, offset);
     }
 
     // Store immediate to [dst + offset]
+    #[rustfmt::skip]
     fn emit_store_imm32(&self, mem: &mut JitMemory, size: OperandSize, dst: u8, offset: i32, imm: i32) {
         match size {
             OperandSize::S16 => self.emit1(mem, 0x66), // 16-bit override
@@ -322,8 +324,8 @@ impl JitCompiler {
             _                => self.emit_basic_rex(mem, 0, 0, dst),
         };
         match size {
-            OperandSize::S8 => self.emit1(mem, 0xc6),
-            _               => self.emit1(mem, 0xc7),
+            OperandSize::S8  => self.emit1(mem, 0xc6),
+            _                => self.emit1(mem, 0xc7),
         };
         self.emit_modrm_and_displacement(mem, 0, dst, offset);
         match size {
@@ -371,7 +373,15 @@ impl JitCompiler {
         self.special_targets.insert(target, mem.offset);
     }
 
-    fn emit_muldivmod(&mut self, mem: &mut JitMemory, pc: u16, opc: u8, src: u8, dst: u8, imm: i32) {
+    fn emit_muldivmod(
+        &mut self,
+        mem: &mut JitMemory,
+        pc: u16,
+        opc: u8,
+        src: u8,
+        dst: u8,
+        imm: i32,
+    ) {
         let mul = (opc & ebpf::BPF_ALU_OP_MASK) == (ebpf::MUL32_IMM & ebpf::BPF_ALU_OP_MASK);
         let div = (opc & ebpf::BPF_ALU_OP_MASK) == (ebpf::DIV32_IMM & ebpf::BPF_ALU_OP_MASK);
         let modrm = (opc & ebpf::BPF_ALU_OP_MASK) == (ebpf::MOD32_IMM & ebpf::BPF_ALU_OP_MASK);
@@ -457,8 +467,28 @@ impl JitCompiler {
         }
     }
 
-    fn jit_compile(&mut self, mem: &mut JitMemory, prog: &[u8], use_mbuff: bool, update_data_ptr: bool,
-                   helpers: &HashMap<u32, ebpf::Helper>) -> Result<(), Error> {
+    fn emit_local_call(&mut self, mem: &mut JitMemory, target_pc: isize) {
+        self.emit_push(mem, map_register(6));
+        self.emit_push(mem, map_register(7));
+        self.emit_push(mem, map_register(8));
+        self.emit_push(mem, map_register(9));
+        // 0xe8 is the opcode for a CALL
+        self.emit1(mem, 0xe8);
+        self.emit_jump_offset(mem, target_pc);
+        self.emit_pop(mem, map_register(9));
+        self.emit_pop(mem, map_register(8));
+        self.emit_pop(mem, map_register(7));
+        self.emit_pop(mem, map_register(6));
+    }
+
+    fn jit_compile(
+        &mut self,
+        mem: &mut JitMemory,
+        prog: &[u8],
+        use_mbuff: bool,
+        update_data_ptr: bool,
+        helpers: &HashMap<u32, ebpf::Helper>,
+    ) -> Result<(), Error> {
         self.emit_push(mem, RBP);
         self.emit_push(mem, RBX);
         self.emit_push(mem, R13);
@@ -481,23 +511,25 @@ impl JitCompiler {
                 if map_register(1) != RDX {
                     self.emit_mov(mem, RDX, map_register(1));
                 }
-            },
+            }
             (true, false) => {
                 // We use a mbuff already pointing to mem and mem_end: move it to register 1.
                 if map_register(1) != RDI {
                     self.emit_mov(mem, RDI, map_register(1));
                 }
-            },
+            }
             (true, true) => {
                 // We have a fixed (simulated) mbuff: update mem and mem_end offset values in it.
+
                 // Store mem at mbuff + mem_offset. Trash R8.
-                self.emit_alu64(mem, 0x01, RDI, R8);                // add mbuff to mem_offset in R8
+                self.emit_alu64(mem, 0x01, RDI, R8); // add mbuff to mem_offset in R8
                 self.emit_store(mem, OperandSize::S64, RDX, R8, 0); // set mem at mbuff + mem_offset
+
                 // Store mem_end at mbuff + mem_end_offset. Trash R9.
-                self.emit_load(mem, OperandSize::S64, RDX, R8, 0);  // load mem into R8
-                self.emit_alu64(mem, 0x01, RCX, R8);                // add mem_len to mem (= mem_end)
-                self.emit_alu64(mem, 0x01, RDI, R9);                // add mbuff to mem_end_offset
-                self.emit_store(mem, OperandSize::S64, R8, R9, 0);  // store mem_end
+                self.emit_load(mem, OperandSize::S64, RDX, R8, 0); // load mem into R8
+                self.emit_alu64(mem, 0x01, RCX, R8); // add mem_len to mem (= mem_end)
+                self.emit_alu64(mem, 0x01, RDI, R9); // add mbuff to mem_end_offset
+                self.emit_store(mem, OperandSize::S64, R8, R9, 0); // store mem_end
 
                 // Move rdi into register 1
                 if map_register(1) != RDI {
@@ -512,9 +544,19 @@ impl JitCompiler {
         // Allocate stack space
         self.emit_alu64_imm32(mem, 0x81, 5, RSP, ebpf::STACK_SIZE as i32);
 
+        // Use a call to set up a place where we can land after eBPF program's
+        // final EXIT call. This will make JIT of BPF EXIT call easier in the
+        // presence of calls to local functions.
+        self.emit1(mem, 0xe8);
+        self.emit4(mem, 5);
+
+        // We jump over this instruction in the first place; return here
+        // after the eBPF program is finished executing.
+        self.emit_jmp(mem, TARGET_PC_EXIT);
+
         self.pc_locs = vec![0; prog.len() / ebpf::INSN_SIZE + 1];
 
-        let mut insn_ptr:usize = 0;
+        let mut insn_ptr: usize = 0;
         while insn_ptr * ebpf::INSN_SIZE < prog.len() {
             let insn = ebpf::get_insn(prog, insn_ptr);
 
@@ -524,7 +566,9 @@ impl JitCompiler {
             let src = map_register(insn.src);
             let target_pc = insn_ptr as isize + insn.off as isize + 1;
 
-            match insn.opc {
+            #[rustfmt::skip]
+            #[allow(clippy::let_unit_value)] // assign, to avoid #[rustfmt::skip] on an expression
+            let _ = match insn.opc {
 
                 // BPF_LD class
                 // R10 is a constant pointer to mem.
@@ -540,29 +584,29 @@ impl JitCompiler {
                     self.emit_mov(mem, R10, R11);                              // load mem into R11
                     self.emit_alu64(mem, 0x01, src, R11);                      // add src to R11
                     self.emit_load(mem, OperandSize::S8,  R11, RAX, insn.imm); // ld R0, mem[src+imm]
-                },
+                }
                 ebpf::LD_IND_H   => {
                     self.emit_mov(mem, R10, R11);                              // load mem into R11
                     self.emit_alu64(mem, 0x01, src, R11);                      // add src to R11
                     self.emit_load(mem, OperandSize::S16, R11, RAX, insn.imm); // ld R0, mem[src+imm]
-                },
+                }
                 ebpf::LD_IND_W   => {
                     self.emit_mov(mem, R10, R11);                              // load mem into R11
                     self.emit_alu64(mem, 0x01, src, R11);                      // add src to R11
                     self.emit_load(mem, OperandSize::S32, R11, RAX, insn.imm); // ld R0, mem[src+imm]
-                },
+                }
                 ebpf::LD_IND_DW  => {
                     self.emit_mov(mem, R10, R11);                              // load mem into R11
                     self.emit_alu64(mem, 0x01, src, R11);                      // add src to R11
                     self.emit_load(mem, OperandSize::S64, R11, RAX, insn.imm); // ld R0, mem[src+imm]
-                },
+                }
 
                 ebpf::LD_DW_IMM  => {
                     insn_ptr += 1;
                     let second_part = ebpf::get_insn(prog, insn_ptr).imm as u64;
                     let imm = (insn.imm as u32) as u64 | second_part.wrapping_shl(32);
                     self.emit_load_imm(mem, dst, imm as i64);
-                },
+                }
 
                 // BPF_LDX class
                 ebpf::LD_B_REG   =>
@@ -601,9 +645,12 @@ impl JitCompiler {
                 ebpf::ADD32_REG  => self.emit_alu32(mem, 0x01, src, dst),
                 ebpf::SUB32_IMM  => self.emit_alu32_imm32(mem, 0x81, 5, dst, insn.imm),
                 ebpf::SUB32_REG  => self.emit_alu32(mem, 0x29, src, dst),
-                ebpf::MUL32_IMM | ebpf::MUL32_REG |
-                    ebpf::DIV32_IMM | ebpf::DIV32_REG |
-                    ebpf::MOD32_IMM | ebpf::MOD32_REG =>
+                ebpf::MUL32_IMM
+                | ebpf::MUL32_REG
+                | ebpf::DIV32_IMM
+                | ebpf::DIV32_REG
+                | ebpf::MOD32_IMM
+                | ebpf::MOD32_REG =>
                     self.emit_muldivmod(mem, insn_ptr as u16, insn.opc, src, dst, insn.imm),
                 ebpf::OR32_IMM   => self.emit_alu32_imm32(mem, 0x81, 1, dst, insn.imm),
                 ebpf::OR32_REG   => self.emit_alu32(mem, 0x09, src, dst),
@@ -613,12 +660,12 @@ impl JitCompiler {
                 ebpf::LSH32_REG  => {
                     self.emit_mov(mem, src, RCX);
                     self.emit_alu32(mem, 0xd3, 4, dst);
-                },
+                }
                 ebpf::RSH32_IMM  => self.emit_alu32_imm8(mem, 0xc1, 5, dst, insn.imm as i8),
                 ebpf::RSH32_REG  => {
                     self.emit_mov(mem, src, RCX);
                     self.emit_alu32(mem, 0xd3, 5, dst);
-                },
+                }
                 ebpf::NEG32      => self.emit_alu32(mem, 0xf7, 3, dst),
                 ebpf::XOR32_IMM  => self.emit_alu32_imm32(mem, 0x81, 6, dst, insn.imm),
                 ebpf::XOR32_REG  => self.emit_alu32(mem, 0x31, src, dst),
@@ -628,7 +675,7 @@ impl JitCompiler {
                 ebpf::ARSH32_REG => {
                     self.emit_mov(mem, src, RCX);
                     self.emit_alu32(mem, 0xd3, 7, dst);
-                },
+                }
                 ebpf::LE         => {}, // No-op
                 ebpf::BE         => {
                     match insn.imm {
@@ -689,209 +736,229 @@ impl JitCompiler {
                 ebpf::JEQ_IMM    => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x84, target_pc);
-                },
+                }
                 ebpf::JEQ_REG    => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x84, target_pc);
-                },
+                }
                 ebpf::JGT_IMM    => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x87, target_pc);
-                },
+                }
                 ebpf::JGT_REG    => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x87, target_pc);
-                },
+                }
                 ebpf::JGE_IMM    => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x83, target_pc);
-                },
+                }
                 ebpf::JGE_REG    => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x83, target_pc);
-                },
+                }
                 ebpf::JLT_IMM    => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x82, target_pc);
-                },
+                }
                 ebpf::JLT_REG    => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x82, target_pc);
-                },
+                }
                 ebpf::JLE_IMM    => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x86, target_pc);
-                },
+                }
                 ebpf::JLE_REG    => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x86, target_pc);
-                },
+                }
                 ebpf::JSET_IMM   => {
                     self.emit_alu64_imm32(mem, 0xf7, 0, dst, insn.imm);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JSET_REG   => {
                     self.emit_alu64(mem, 0x85, src, dst);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JNE_IMM    => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JNE_REG    => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JSGT_IMM   => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8f, target_pc);
-                },
+                }
                 ebpf::JSGT_REG   => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x8f, target_pc);
-                },
+                }
                 ebpf::JSGE_IMM   => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8d, target_pc);
-                },
+                }
                 ebpf::JSGE_REG   => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x8d, target_pc);
-                },
+                }
                 ebpf::JSLT_IMM   => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8c, target_pc);
-                },
+                }
                 ebpf::JSLT_REG   => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x8c, target_pc);
-                },
+                }
                 ebpf::JSLE_IMM   => {
                     self.emit_cmp_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8e, target_pc);
-                },
+                }
                 ebpf::JSLE_REG   => {
                     self.emit_cmp(mem, src, dst);
                     self.emit_jcc(mem, 0x8e, target_pc);
-                },
+                }
 
                 // BPF_JMP32 class
                 ebpf::JEQ_IMM32  => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x84, target_pc);
-                },
+                }
                 ebpf::JEQ_REG32  => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x84, target_pc);
-                },
+                }
                 ebpf::JGT_IMM32  => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x87, target_pc);
-                },
+                }
                 ebpf::JGT_REG32  => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x87, target_pc);
-                },
+                }
                 ebpf::JGE_IMM32  => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x83, target_pc);
-                },
+                }
                 ebpf::JGE_REG32  => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x83, target_pc);
-                },
+                }
                 ebpf::JLT_IMM32  => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x82, target_pc);
-                },
+                }
                 ebpf::JLT_REG32  => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x82, target_pc);
-                },
+                }
                 ebpf::JLE_IMM32  => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x86, target_pc);
-                },
+                }
                 ebpf::JLE_REG32  => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x86, target_pc);
-                },
+                }
                 ebpf::JSET_IMM32 => {
                     self.emit_alu32_imm32(mem, 0xf7, 0, dst, insn.imm);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JSET_REG32 => {
                     self.emit_alu32(mem, 0x85, src, dst);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JNE_IMM32  => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JNE_REG32  => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x85, target_pc);
-                },
+                }
                 ebpf::JSGT_IMM32 => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8f, target_pc);
-                },
+                }
                 ebpf::JSGT_REG32 => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x8f, target_pc);
-                },
+                }
                 ebpf::JSGE_IMM32 => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8d, target_pc);
-                },
+                }
                 ebpf::JSGE_REG32 => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x8d, target_pc);
-                },
+                }
                 ebpf::JSLT_IMM32 => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8c, target_pc);
-                },
+                }
                 ebpf::JSLT_REG32 => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x8c, target_pc);
-                },
+                }
                 ebpf::JSLE_IMM32 => {
                     self.emit_cmp32_imm32(mem, dst, insn.imm);
                     self.emit_jcc(mem, 0x8e, target_pc);
-                },
+                }
                 ebpf::JSLE_REG32 => {
                     self.emit_cmp32(mem, src, dst);
                     self.emit_jcc(mem, 0x8e, target_pc);
-                },
+                }
 
                 ebpf::CALL       => {
-                    // For JIT, helpers in use MUST be registered at compile time. They can be
-                    // updated later, but not created after compiling (we need the address of the
-                    // helper function in the JIT-compiled program).
-                    if let Some(helper) = helpers.get(&(insn.imm as u32)) {
-                        // We reserve RCX for shifts
-                        self.emit_mov(mem, R9, RCX);
-                        self.emit_call(mem, *helper as usize);
-                    } else {
-                        Err(Error::new(ErrorKind::Other,
-                                       format!("[JIT] Error: unknown helper function (id: {:#x})",
-                                               insn.imm as u32)))?;
-                    };
-                },
+                    match insn.src {
+                        0x0 => {
+                            // For JIT, helpers in use MUST be registered at compile time. They can be
+                            // updated later, but not created after compiling (we need the address of the
+                            // helper function in the JIT-compiled program).
+                            if let Some(helper) = helpers.get(&(insn.imm as u32)) {
+                                // We reserve RCX for shifts
+                                self.emit_mov(mem, R9, RCX);
+                                self.emit_call(mem, *helper as usize);
+                            } else {
+                                Err(Error::other(
+                                    format!(
+                                        "[JIT] Error: unknown helper function (id: {:#x})",
+                                        insn.imm as u32
+                                    )
+                                ))?;
+                            };
+                        }
+                        0x1 => {
+                            let target_pc = insn_ptr as isize + insn.imm as isize + 1;
+                            self.emit_local_call(mem, target_pc);
+                        }
+                        _ => {
+                            Err(Error::other(
+                                format!(
+                                    "[JIT] Error: unexpected call type #{:?} (insn #{insn_ptr:?})",
+                                    insn.src
+                                )
+                            ))?;
+                        }
+                    }
+                }
                 ebpf::TAIL_CALL  => { unimplemented!() },
                 ebpf::EXIT       => {
-                    if insn_ptr != prog.len() / ebpf::INSN_SIZE - 1 {
-                        self.emit_jmp(mem, TARGET_PC_EXIT);
-                    };
-                },
+                    self.emit1(mem, 0xc3); // ret
+                }
 
                 _                => {
-                    Err(Error::new(ErrorKind::Other,
-                                   format!("[JIT] Error: unknown eBPF opcode {:#2x} (insn #{insn_ptr:?})",
-                                           insn.opc)))?;
-                },
-            }
+                    Err(Error::other(
+                        format!(
+                            "[JIT] Error: unknown eBPF opcode {:#2x} (insn #{insn_ptr:?})",
+                            insn.opc
+                        ),
+                    ))?;
+                }
+            };
 
             insn_ptr += 1;
         }
@@ -918,23 +985,20 @@ impl JitCompiler {
         Ok(())
     }
 
-    fn resolve_jumps(&mut self, mem: &mut JitMemory) -> Result<(), Error>
-    {
+    fn resolve_jumps(&mut self, mem: &mut JitMemory) -> Result<(), Error> {
         for jump in &self.jumps {
             let target_loc = match self.special_targets.get(&jump.target_pc) {
                 Some(target) => *target,
-                None         => self.pc_locs[jump.target_pc as usize]
+                None => self.pc_locs[jump.target_pc as usize],
             };
 
             // Assumes jump offset is at end of instruction
             unsafe {
-                let offset_loc = jump.offset_loc as i32 + std::mem::size_of::<i32>() as i32;
+                let offset_loc = jump.offset_loc as i32 + core::mem::size_of::<i32>() as i32;
                 let rel = &(target_loc as i32 - offset_loc) as *const i32;
 
-                let offset_ptr = mem.contents.as_ptr().add(jump.offset_loc);
-
-                libc::memcpy(offset_ptr as *mut libc::c_void, rel as *const libc::c_void,
-                             std::mem::size_of::<i32>());
+                let offset_ptr = mem.contents.as_ptr().add(jump.offset_loc) as *mut u8;
+                ptr::copy_nonoverlapping(rel.cast::<u8>(), offset_ptr, core::mem::size_of::<i32>());
             }
         }
         Ok(())
@@ -943,21 +1007,73 @@ impl JitCompiler {
 
 pub struct JitMemory<'a> {
     contents: &'a mut [u8],
-    offset:   usize,
+    #[cfg(feature = "std")]
+    layout: std::alloc::Layout,
+    offset: usize,
 }
 
 impl<'a> JitMemory<'a> {
-    pub fn new(prog: &[u8], helpers: &HashMap<u32, ebpf::Helper>, use_mbuff: bool,
-               update_data_ptr: bool) -> Result<JitMemory<'a>, Error> {
-        let contents: &mut[u8];
-        let mut raw: mem::MaybeUninit<*mut libc::c_void> = mem::MaybeUninit::uninit();
-        unsafe {
+    #[cfg(feature = "std")]
+    pub fn new(
+        prog: &[u8],
+        helpers: &HashMap<u32, ebpf::Helper>,
+        use_mbuff: bool,
+        update_data_ptr: bool,
+    ) -> Result<JitMemory<'a>, Error> {
+        let layout;
+
+        // Allocate the appropriately sized memory.
+        let contents = unsafe {
+            // Create a layout with the proper size and alignment.
             let size = NUM_PAGES * PAGE_SIZE;
-            libc::posix_memalign(raw.as_mut_ptr(), PAGE_SIZE, size);
-            libc::mprotect(*raw.as_mut_ptr(), size, libc::PROT_EXEC | libc::PROT_READ | libc::PROT_WRITE);
-            std::ptr::write_bytes(*raw.as_mut_ptr(), 0xc3, size);  // for now, prepopulate with 'RET' calls
-            contents = std::slice::from_raw_parts_mut(*raw.as_mut_ptr() as *mut u8, NUM_PAGES * PAGE_SIZE);
-            raw.assume_init();
+            layout = std::alloc::Layout::from_size_align_unchecked(size, PAGE_SIZE);
+
+            // Allocate the region of memory.
+            let ptr = std::alloc::alloc(layout);
+            if ptr.is_null() {
+                return Err(Error::from(std::io::ErrorKind::OutOfMemory));
+            }
+
+            // Protect it.
+            libc::mprotect(ptr.cast(), size, libc::PROT_EXEC | libc::PROT_WRITE);
+
+            // Convert to a slice.
+            std::slice::from_raw_parts_mut(ptr, size)
+        };
+
+        let mut mem = JitMemory {
+            contents,
+            layout,
+            offset: 0,
+        };
+
+        let mut jit = JitCompiler::new();
+        jit.jit_compile(&mut mem, prog, use_mbuff, update_data_ptr, helpers)?;
+        jit.resolve_jumps(&mut mem)?;
+
+        Ok(mem)
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn new(
+        prog: &[u8],
+        executable_memory: &'a mut [u8],
+        helpers: &HashMap<u32, ebpf::Helper>,
+        use_mbuff: bool,
+        update_data_ptr: bool,
+    ) -> Result<JitMemory<'a>, Error> {
+        let contents = executable_memory;
+        if contents.len() < NUM_PAGES * PAGE_SIZE {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "Executable memory is too small",
+            ));
+        }
+        if contents.as_ptr() as usize % PAGE_SIZE != 0 {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "Executable memory is not aligned",
+            ));
         }
 
         let mut mem = JitMemory {
@@ -977,7 +1093,7 @@ impl<'a> JitMemory<'a> {
     }
 }
 
-impl<'a> Index<usize> for JitMemory<'a> {
+impl Index<usize> for JitMemory<'_> {
     type Output = u8;
 
     fn index(&self, _index: usize) -> &u8 {
@@ -985,21 +1101,22 @@ impl<'a> Index<usize> for JitMemory<'a> {
     }
 }
 
-impl<'a> IndexMut<usize> for JitMemory<'a> {
+impl IndexMut<usize> for JitMemory<'_> {
     fn index_mut(&mut self, _index: usize) -> &mut u8 {
         &mut self.contents[_index]
     }
 }
 
-impl<'a> Drop for JitMemory<'a> {
+#[cfg(feature = "std")]
+impl Drop for JitMemory<'_> {
     fn drop(&mut self) {
         unsafe {
-            libc::free(self.contents.as_mut_ptr() as *mut libc::c_void);
+            std::alloc::dealloc(self.contents.as_mut_ptr(), self.layout);
         }
     }
 }
 
-impl<'a> std::fmt::Debug for JitMemory<'a> {
+impl core::fmt::Debug for JitMemory<'_> {
     fn fmt(&self, fmt: &mut Formatter) -> Result<(), FormatterError> {
         fmt.write_str("JIT contents: [")?;
         fmt.write_str(" ] | ")?;

@@ -5,27 +5,39 @@
 // Copyright 2016 6WIND S.A. <quentin.monnet@6wind.com>
 //      (Translation to Rust, MetaBuff/multiple classes addition, hashmaps for helpers)
 
-use ebpf;
+use crate::ebpf;
+use crate::ebpf::MAX_CALL_DEPTH;
 use crate::lib::*;
+use crate::stack::{StackFrame, StackUsage};
+use std::ops::Range;
 
-fn check_mem(addr: u64, len: usize, access_type: &str, insn_ptr: usize,
-             mbuff: &[u8], mem: &[u8], stack: &[u8], allowed_memory: &HashSet<u64>) -> Result<(), Error> {
+#[allow(clippy::too_many_arguments)]
+fn check_mem(
+    addr: u64,
+    len: usize,
+    access_type: &str,
+    insn_ptr: usize,
+    mbuff: &[u8],
+    mem: &[u8],
+    stack: &[u8],
+    allowed_memory: &HashSet<Range<u64>>,
+) -> Result<(), Error> {
     if let Some(addr_end) = addr.checked_add(len as u64) {
-      if mbuff.as_ptr() as u64 <= addr && addr_end <= mbuff.as_ptr() as u64 + mbuff.len() as u64 {
-          return Ok(());
-      }
-      if mem.as_ptr() as u64 <= addr && addr_end <= mem.as_ptr() as u64 + mem.len() as u64 {
-          return Ok(());
-      }
-      if stack.as_ptr() as u64 <= addr && addr_end <= stack.as_ptr() as u64 + stack.len() as u64 {
-          return Ok(());
-      }
-      if allowed_memory.contains(&addr) {
-          return Ok(());
-      }
+        if mbuff.as_ptr() as u64 <= addr && addr_end <= mbuff.as_ptr() as u64 + mbuff.len() as u64 {
+            return Ok(());
+        }
+        if mem.as_ptr() as u64 <= addr && addr_end <= mem.as_ptr() as u64 + mem.len() as u64 {
+            return Ok(());
+        }
+        if stack.as_ptr() as u64 <= addr && addr_end <= stack.as_ptr() as u64 + stack.len() as u64 {
+            return Ok(());
+        }
+        if allowed_memory.iter().any(|range| range.contains(&addr)) {
+            return Ok(());
+        }
     }
 
-    Err(Error::new(ErrorKind::Other, format!(
+    Err(Error::other(format!(
         "Error: out of bounds memory {} (insn #{:?}), addr {:#x}, size {:?}\nmbuff: {:#x}/{:#x}, mem: {:#x}/{:#x}, stack: {:#x}/{:#x}",
         access_type, insn_ptr, addr, len,
         mbuff.as_ptr() as u64, mbuff.len(),
@@ -34,47 +46,87 @@ fn check_mem(addr: u64, len: usize, access_type: &str, insn_ptr: usize,
     )))
 }
 
-#[allow(unknown_lints)]
-#[allow(cyclomatic_complexity)]
 pub fn execute_program(
     prog_: Option<&[u8]>,
+    stack_usage: Option<&StackUsage>,
     mem: &[u8],
     mbuff: &[u8],
     helpers: &HashMap<u32, ebpf::Helper>,
-    allowed_memory: &HashSet<u64>,
+    allowed_memory: &HashSet<Range<u64>>,
 ) -> Result<u64, Error> {
     const U32MAX: u64 = u32::MAX as u64;
     const SHIFT_MASK_64: u64 = 0x3f;
 
-    let prog = match prog_ {
-        Some(prog) => prog,
-        None => Err(Error::new(ErrorKind::Other,
-                    "Error: No program set, call prog_set() to load one"))?,
+    let (prog, stack_usage) = match prog_ {
+        Some(prog) => (prog, stack_usage.unwrap()),
+        None => Err(Error::other(
+            "Error: No program set, call prog_set() to load one",
+        ))?,
     };
-    let stack = vec![0u8;ebpf::STACK_SIZE];
+    let stack = vec![0u8; ebpf::STACK_SIZE];
+    let mut stacks = [StackFrame::new(); MAX_CALL_DEPTH];
+    let mut stack_frame_idx = 0;
 
     // R1 points to beginning of memory area, R10 to stack
-    let mut reg: [u64;11] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, stack.as_ptr() as u64 + stack.len() as u64
+    let mut reg: [u64; 11] = [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        stack.as_ptr() as u64 + stack.len() as u64,
     ];
     if !mbuff.is_empty() {
         reg[1] = mbuff.as_ptr() as u64;
-    }
-    else if !mem.is_empty() {
+    } else if !mem.is_empty() {
         reg[1] = mem.as_ptr() as u64;
     }
 
-    let check_mem_load = | addr: u64, len: usize, insn_ptr: usize | {
-        check_mem(addr, len, "load", insn_ptr, mbuff, mem, &stack, allowed_memory)
+    let check_mem_load = |addr: u64, len: usize, insn_ptr: usize| {
+        check_mem(
+            addr,
+            len,
+            "load",
+            insn_ptr,
+            mbuff,
+            mem,
+            &stack,
+            allowed_memory,
+        )
     };
-    let check_mem_store = | addr: u64, len: usize, insn_ptr: usize | {
-        check_mem(addr, len, "store", insn_ptr, mbuff, mem, &stack, allowed_memory)
+    let check_mem_store = |addr: u64, len: usize, insn_ptr: usize| {
+        check_mem(
+            addr,
+            len,
+            "store",
+            insn_ptr,
+            mbuff,
+            mem,
+            &stack,
+            allowed_memory,
+        )
     };
 
     // Loop on instructions
-    let mut insn_ptr:usize = 0;
+    let mut insn_ptr: usize = 0;
+    // Debug tracing disabled - uncomment to debug:
+    // eprintln!("interpreter: starting execution, prog.len()={}, helpers.len()={}", 
+    //           prog.len(), helpers.len());
     while insn_ptr * ebpf::INSN_SIZE < prog.len() {
         let insn = ebpf::get_insn(prog, insn_ptr);
+        // Debug tracing disabled - uncomment to debug:
+        // eprintln!("interpreter: insn_ptr={} opc=0x{:02x} dst={} src={} off={} imm={}",
+        //           insn_ptr, insn.opc, insn.dst, insn.src, insn.off, insn.imm);
+        if stack_frame_idx < MAX_CALL_DEPTH {
+            if let Some(usage) = stack_usage.stack_usage_for_local_func(insn_ptr) {
+                stacks[stack_frame_idx].set_stack_usage(usage);
+            }
+        }
         insn_ptr += 1;
         let _dst = insn.dst as usize;
         let _src = insn.src as usize;
@@ -83,7 +135,15 @@ pub fn execute_program(
             insn_ptr = (insn_ptr as i16 + insn.off) as usize;
         };
 
-        match insn.opc {
+        macro_rules! unsigned_u64 {
+            ($imm:expr) => {
+                ($imm as u32) as u64
+            };
+        }
+
+        #[rustfmt::skip]
+        #[allow(clippy::let_unit_value)] // assign, to avoid #[rustfmt::skip] on an expression
+        let _ = match insn.opc {
 
             // BPF_LD class
             // LD_ABS_* and LD_IND_* are supposed to load pointer to data from metadata buffer.
@@ -138,81 +198,83 @@ pub fn execute_program(
 
             // BPF_LDX class
             ebpf::LD_B_REG   => reg[_dst] = unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u8;
+                let x = (reg[_src] as *const u8).wrapping_offset(insn.off as isize);
                 check_mem_load(x as u64, 1, insn_ptr)?;
                 x.read_unaligned() as u64
             },
             ebpf::LD_H_REG   => reg[_dst] = unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u16;
+                let x = (reg[_src] as *const u8).wrapping_offset(insn.off as isize) as *const u16;
                 check_mem_load(x as u64, 2, insn_ptr)?;
                 x.read_unaligned() as u64
             },
             ebpf::LD_W_REG   => reg[_dst] = unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u32;
+                let x = (reg[_src] as *const u8).wrapping_offset(insn.off as isize) as *const u32;
                 check_mem_load(x as u64, 4, insn_ptr)?;
                 x.read_unaligned() as u64
             },
             ebpf::LD_DW_REG  => reg[_dst] = unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u64;
+                let x = (reg[_src] as *const u8).wrapping_offset(insn.off as isize) as *const u64;
                 check_mem_load(x as u64, 8, insn_ptr)?;
                 x.read_unaligned()
             },
 
             // BPF_ST class
             ebpf::ST_B_IMM   => unsafe {
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u8;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u8;
                 check_mem_store(x as u64, 1, insn_ptr)?;
                 x.write_unaligned(insn.imm as u8);
             },
             ebpf::ST_H_IMM   => unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u16;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u16;
                 check_mem_store(x as u64, 2, insn_ptr)?;
                 x.write_unaligned(insn.imm as u16);
             },
             ebpf::ST_W_IMM   => unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u32;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u32;
                 check_mem_store(x as u64, 4, insn_ptr)?;
                 x.write_unaligned(insn.imm as u32);
             },
             ebpf::ST_DW_IMM  => unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u64;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u64;
                 check_mem_store(x as u64, 8, insn_ptr)?;
                 x.write_unaligned(insn.imm as u64);
             },
 
             // BPF_STX class
             ebpf::ST_B_REG   => unsafe {
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u8;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u8;
                 check_mem_store(x as u64, 1, insn_ptr)?;
                 x.write_unaligned(reg[_src] as u8);
             },
             ebpf::ST_H_REG   => unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u16;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u16;
                 check_mem_store(x as u64, 2, insn_ptr)?;
                 x.write_unaligned(reg[_src] as u16);
             },
             ebpf::ST_W_REG   => unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u32;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u32;
                 check_mem_store(x as u64, 4, insn_ptr)?;
                 x.write_unaligned(reg[_src] as u32);
             },
             ebpf::ST_DW_REG  => unsafe {
-                #[allow(clippy::cast_ptr_alignment)]
-                let x = (reg[_dst] as *const u8).offset(insn.off as isize) as *mut u64;
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u64;
                 check_mem_store(x as u64, 8, insn_ptr)?;
                 x.write_unaligned(reg[_src]);
             },
-            ebpf::ST_W_XADD  => unimplemented!(),
-            ebpf::ST_DW_XADD => unimplemented!(),
+            ebpf::ST_W_XADD  => unsafe {
+                // Atomic add (32-bit): *dst += src
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u32;
+                check_mem_store(x as u64, 4, insn_ptr)?;
+                let val = x.read_unaligned();
+                x.write_unaligned(val.wrapping_add(reg[_src] as u32));
+            },
+            ebpf::ST_DW_XADD => unsafe {
+                // Atomic add (64-bit): *dst += src
+                let x = (reg[_dst] as *const u8).wrapping_offset(insn.off as isize) as *mut u64;
+                check_mem_store(x as u64, 8, insn_ptr)?;
+                let val = x.read_unaligned();
+                x.write_unaligned(val.wrapping_add(reg[_src]));
+            },
 
             // BPF_ALU class
             // TODO Check how overflow works in kernel. Should we &= U32MAX all src register value
@@ -301,20 +363,22 @@ pub fn execute_program(
 
             // BPF_JMP class
             // TODO: check this actually works as expected for signed / unsigned ops
+            // J-EQ, J-NE, J-GT, J-GE, J-LT, J-LE: unsigned
+            // JS-GT, JS-GE, JS-LT, JS-LE: signed
             ebpf::JA         =>                                             do_jump(),
-            ebpf::JEQ_IMM    => if  reg[_dst] == insn.imm as u64          { do_jump(); },
+            ebpf::JEQ_IMM    => if  reg[_dst] == unsigned_u64!(insn.imm)  { do_jump(); },
             ebpf::JEQ_REG    => if  reg[_dst] == reg[_src]                { do_jump(); },
-            ebpf::JGT_IMM    => if  reg[_dst] >  insn.imm as u64          { do_jump(); },
+            ebpf::JGT_IMM    => if  reg[_dst] >  unsigned_u64!(insn.imm)  { do_jump(); },
             ebpf::JGT_REG    => if  reg[_dst] >  reg[_src]                { do_jump(); },
-            ebpf::JGE_IMM    => if  reg[_dst] >= insn.imm as u64          { do_jump(); },
+            ebpf::JGE_IMM    => if  reg[_dst] >= unsigned_u64!(insn.imm)  { do_jump(); },
             ebpf::JGE_REG    => if  reg[_dst] >= reg[_src]                { do_jump(); },
-            ebpf::JLT_IMM    => if  reg[_dst] <  insn.imm as u64          { do_jump(); },
+            ebpf::JLT_IMM    => if  reg[_dst] <  unsigned_u64!(insn.imm)  { do_jump(); },
             ebpf::JLT_REG    => if  reg[_dst] <  reg[_src]                { do_jump(); },
-            ebpf::JLE_IMM    => if  reg[_dst] <= insn.imm as u64          { do_jump(); },
+            ebpf::JLE_IMM    => if  reg[_dst] <= unsigned_u64!(insn.imm)  { do_jump(); },
             ebpf::JLE_REG    => if  reg[_dst] <= reg[_src]                { do_jump(); },
             ebpf::JSET_IMM   => if  reg[_dst] &  insn.imm as u64 != 0     { do_jump(); },
             ebpf::JSET_REG   => if  reg[_dst] &  reg[_src]       != 0     { do_jump(); },
-            ebpf::JNE_IMM    => if  reg[_dst] != insn.imm as u64          { do_jump(); },
+            ebpf::JNE_IMM    => if  reg[_dst] != unsigned_u64!(insn.imm)  { do_jump(); },
             ebpf::JNE_REG    => if  reg[_dst] != reg[_src]                { do_jump(); },
             ebpf::JSGT_IMM   => if  reg[_dst] as i64  >  insn.imm  as i64 { do_jump(); },
             ebpf::JSGT_REG   => if  reg[_dst] as i64  >  reg[_src] as i64 { do_jump(); },
@@ -351,16 +415,63 @@ pub fn execute_program(
 
             // Do not delegate the check to the verifier, since registered functions can be
             // changed after the program has been verified.
-            ebpf::CALL       => if let Some(function) = helpers.get(&(insn.imm as u32)) {
-                reg[0] = function(reg[1], reg[2], reg[3], reg[4], reg[5]);
-            } else {
-                Err(Error::new(ErrorKind::Other, format!("Error: unknown helper function (id: {:#x})", insn.imm as u32)))?;
-            },
+            ebpf::CALL       => {
+                match _src {
+                    // Call helper function
+                    0 => {
+                        if let Some(function) = helpers.get(&(insn.imm as u32)) {
+                            reg[0] = function(reg[1], reg[2], reg[3], reg[4], reg[5]);
+                        } else {
+                            Err(Error::other(
+                                format!(
+                                    "Error: unknown helper function (id: {:#x})",
+                                    insn.imm as u32
+                                )
+                            ))?;
+                        }
+                    }
+                    // eBPF-to-eBPF call
+                    1 => {
+                        if stack_frame_idx >= MAX_CALL_DEPTH {
+                            Err(Error::other(
+                                format!(
+                                    "Error: too many nested calls (max: {MAX_CALL_DEPTH})"
+                                )
+                            ))?;
+                        }
+                        stacks[stack_frame_idx].save_registers(&reg[6..=9]);
+                        stacks[stack_frame_idx].save_return_address(insn_ptr);
+                        // Why we don't need to check the stack usage here?
+                        // When the stack is exhausted, if there are instructions in the new function
+                        // that read or write to the stack, check_mem_load or check_mem_store will return an error.
+                        reg[10] -= stacks[stack_frame_idx].get_stack_usage().stack_usage() as u64;
+                        stack_frame_idx += 1;
+                        insn_ptr += insn.imm as usize;
+                    }
+                    _ => {
+                        Err(Error::other(
+                            format!("Error: unsupported call type #{} (insn #{})",
+                                _src,
+                                insn_ptr-1
+                            )
+                        ))?;
+                    }
+                }
+            }
             ebpf::TAIL_CALL  => unimplemented!(),
-            ebpf::EXIT       => return Ok(reg[0]),
+            ebpf::EXIT       => {
+                if stack_frame_idx > 0 {
+                    stack_frame_idx -= 1;
+                    reg[6..=9].copy_from_slice(&stacks[stack_frame_idx].get_registers());
+                    insn_ptr = stacks[stack_frame_idx].get_return_address();
+                    reg[10] += stacks[stack_frame_idx].get_stack_usage().stack_usage() as u64;
+                } else {
+                    return Ok(reg[0]);
+                }
+            }
 
             _                => unreachable!()
-        }
+        };
     }
 
     unreachable!()

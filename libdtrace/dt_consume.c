@@ -24,13 +24,14 @@
 #include <dt_string.h>
 #include <libproc.h>
 #include <port.h>
-#include <sys/epoll.h>
 #if defined(__linux__)
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <linux/perf_event.h>
-#endif
-#ifdef __redox__
+#elif defined(__redox__)
 #include <dt_bpf_backend.h>
+#include <linux/perf_event.h>  /* For perf_event_header, perf_event_mmap_page */
+#define PERF_RECORD_LOST	2
 #endif
 
 #define	DT_MASK_LO 0x00000000FFFFFFFFULL
@@ -2439,12 +2440,40 @@ dt_consume_one(dtrace_hdl_t *dtp, FILE *fp, char *buf,
 		return DTRACE_WORKSTATUS_ERROR;
 }
 
+#ifdef __redox__
+/*
+ * On Redox, our user-space perf buffer has a simple layout:
+ *   offset 0: uint64_t data_head
+ *   offset 8: uint64_t data_tail
+ *   offset 16: char data[...]
+ */
+static inline uint64_t
+ring_buffer_read_head(volatile void *rb_page)
+{
+	volatile uint64_t *head_ptr = (volatile uint64_t *)rb_page;
+	uint64_t head = *head_ptr;
+	asm volatile("" : : : "memory");
+	return head;
+}
+
+static inline void
+ring_buffer_write_tail(volatile void *rb_page, uint64_t tail)
+{
+	volatile uint64_t *tail_ptr = (volatile uint64_t *)rb_page + 1;
+	asm volatile("" : : : "memory");
+	*tail_ptr = tail;
+}
+#else
 static inline uint64_t
 ring_buffer_read_head(volatile struct perf_event_mmap_page *rb_page)
 {
 	uint64_t	head = rb_page->data_head;
 
+#if defined(__GNUC__) || defined(__clang__)
 	asm volatile("" : : : "memory");
+#else
+	__sync_synchronize();
+#endif
 	return head;
 }
 
@@ -2452,9 +2481,14 @@ static inline void
 ring_buffer_write_tail(volatile struct perf_event_mmap_page *rb_page,
 		       uint64_t tail)
 {
+#if defined(__GNUC__) || defined(__clang__)
 	asm volatile("" : : : "memory");
+#else
+	__sync_synchronize();
+#endif
 	rb_page->data_tail = tail;
 }
+#endif /* __redox__ */
 
 int
 dt_consume_cpu(dtrace_hdl_t *dtp, FILE *fp, dt_peb_t *peb,
@@ -2504,9 +2538,14 @@ dt_consume_cpu(dtrace_hdl_t *dtp, FILE *fp, dt_peb_t *peb,
 		head = ring_buffer_read_head(rb_page);
 		peb->last_head = head;
 	}
+#ifdef __redox__
+	/* On Redox, tail is at offset 8 (second uint64_t) */
+	tail = *((volatile uint64_t *)peb->base + 1);
+#else
 	tail = rb_page->data_tail;
+#endif
 
-	while (tail != head) {
+while (tail != head) {
 		dtrace_workstatus_t rval = DTRACE_WORKSTATUS_OKAY;
 
 		event = base + tail % data_size;
@@ -2611,6 +2650,7 @@ dt_consume_begin_error(const dtrace_errdata_t *data, void *arg)
 	return begin->dtbgn_errhdlr(data, begin->dtbgn_errarg);
 }
 
+#if defined(__linux__)
 /*
  * There is this idea that the BEGIN probe should be processed before
  * everything else, and that the END probe should be processed after anything
@@ -2736,7 +2776,9 @@ dt_consume_begin(dtrace_hdl_t *dtp, FILE *fp, struct epoll_event *events,
 
 	return rval;
 }
+#endif /* __linux__ */
 
+#if defined(__linux__)
 static void
 dt_consume_proc_exits(dtrace_hdl_t *dtp)
 {
@@ -2786,6 +2828,7 @@ dt_consume_proc_exits(dtrace_hdl_t *dtp)
 
 	pthread_mutex_unlock(&dph->dph_lock);
 }
+#endif /* __linux__ */
 
 int
 dt_consume_init(dtrace_hdl_t *dtp)
@@ -2912,10 +2955,17 @@ dtrace_consume(dtrace_hdl_t *dtp, FILE *fp, dtrace_consume_probe_f *pf,
 	}
 #elif defined(__redox__)
 	/*
-	 * On RedoxOS, BEGIN probe data is handled directly.
-	 * The dt_beganon field is set when BEGIN completes.
+	 * On RedoxOS, BEGIN probe data is handled via the same ring buffer
+	 * mechanism.  We mark it as processed here.
 	 */
 	if (dtp->dt_beganon != -1) {
+		/* Process BEGIN data from the ring buffer */
+		if (dtp->dt_pebset != NULL && dtp->dt_pebset->pebs != NULL) {
+			dt_peb_t *peb = &dtp->dt_pebset->pebs[0];
+			rval = dt_consume_cpu(dtp, fp, peb, pf, rf, 0, arg);
+			if (rval != 0)
+				return rval;
+		}
 		dtp->dt_beganon = -1;  /* Mark as processed */
 		dtp->dt_lastagg = 0;
 		dtp->dt_lastswitch = 0;
@@ -2943,17 +2993,17 @@ drain:
 	}
 #elif defined(__redox__)
 	/*
-	 * On RedoxOS, we poll BPF output maps directly.
-	 * For self-trace mode, we process a single "virtual" CPU.
-	 * The actual data comes from the BPF program execution results
-	 * stored in maps by the rbpf backend.
+	 * On RedoxOS, we use our user-space ring buffer.
+	 * Process the single CPU 0 buffer.
 	 */
-	(void)i;  /* Suppress unused variable warning */
+	(void)i;
 	(void)cnt;
-	/* 
-	 * TODO: Implement RedoxOS-specific output consumption from BPF maps.
-	 * For now, output is handled directly by the rbpf backend.
-	 */
+	if (dtp->dt_pebset != NULL && dtp->dt_pebset->pebs != NULL) {
+		dt_peb_t *peb = &dtp->dt_pebset->pebs[0];
+		rval = dt_consume_cpu(dtp, fp, peb, pf, rf, 0, arg);
+		if (rval != 0)
+			return rval;
+	}
 #endif
 
 	/*

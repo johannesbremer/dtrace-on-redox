@@ -229,6 +229,23 @@ out:
 
 static int attach(dtrace_hdl_t *dtp, const dt_probe_t *prp, int bpf_fd)
 {
+#ifdef __redox__
+	/*
+	 * On RedoxOS, the BEGIN/END/ERROR probes are fired directly
+	 * in user-space rather than via uprobes.  Save the BPF program
+	 * handle for later execution in dtrace_go().
+	 */
+	const char *prb = prp->desc->prb;
+
+	if (strcmp(prb, "BEGIN") == 0) {
+		dtp->dt_begin_prog = bpf_fd;
+	} else if (strcmp(prb, "END") == 0) {
+		dtp->dt_end_prog = bpf_fd;
+	}
+	/* ERROR probe is handled elsewhere */
+
+	return 0;
+#else
 	if (!dt_tp_probe_has_info(prp)) {
 		char	*spec;
 		char	*fn;
@@ -275,6 +292,7 @@ static int attach(dtrace_hdl_t *dtp, const dt_probe_t *prp, int bpf_fd)
 
 	/* attach BPF program to the tracepoint */
 	return dt_tp_probe_attach(dtp, prp, bpf_fd);
+#endif /* !__redox__ */
 }
 
 /*
@@ -290,6 +308,14 @@ static int attach(dtrace_hdl_t *dtp, const dt_probe_t *prp, int bpf_fd)
  */
 static void detach(dtrace_hdl_t *dtp, const dt_probe_t *prp)
 {
+#ifdef __redox__
+	/*
+	 * On RedoxOS, no resources were allocated during attach,
+	 * so nothing needs to be cleaned up.
+	 */
+	(void)dtp;
+	(void)prp;
+#else
 	int		fd;
 
 	if (!dt_tp_probe_has_info(prp))
@@ -303,6 +329,7 @@ static void detach(dtrace_hdl_t *dtp, const dt_probe_t *prp)
 
 	dprintf(fd, "-:" GROUP_FMT "/%s\n", GROUP_DATA, prp->desc->prb);
 	close(fd);
+#endif /* !__redox__ */
 }
 
 dt_provimpl_t	dt_dtrace = {

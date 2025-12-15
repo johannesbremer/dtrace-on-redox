@@ -43,6 +43,7 @@ extern int rbpf_vm_register_helper(void *vm, uint32_t idx,
 extern uint64_t rbpf_vm_exec(void *vm, const uint8_t *mem, size_t mem_len);
 extern int rbpf_vm_jit_compile(void *vm);
 extern uint64_t rbpf_vm_exec_jit(void *vm, const uint8_t *mem, size_t mem_len);
+extern int rbpf_vm_allow_all_memory(void *vm);
 
 #endif /* USE_RBPF_BACKEND */
 
@@ -335,6 +336,62 @@ rbpf_map_lookup(dt_bpf_map_t handle, const void *key, void *value)
 	default:
 		errno = EINVAL;
 		return -1;
+	}
+}
+
+/*
+ * Return a direct pointer to the map element value.
+ * This allows BPF programs to modify the value in place (e.g., via XADD).
+ */
+static void *
+rbpf_map_lookup_ptr(dt_bpf_map_t handle, const void *key)
+{
+	rbpf_map_t *map;
+	uint32_t idx;
+
+	if (handle < 0 || handle >= RBPF_MAX_MAPS ||
+	    !rbpf_ctx.maps[handle].in_use) {
+		errno = EBADF;
+		return NULL;
+	}
+
+	map = &rbpf_ctx.maps[handle];
+
+	switch (map->type) {
+	case DT_BPF_MAP_TYPE_ARRAY:
+	case DT_BPF_MAP_TYPE_PERCPU_ARRAY:
+	case DT_BPF_MAP_TYPE_PERF_EVENT_ARRAY:
+	case DT_BPF_MAP_TYPE_ARRAY_OF_MAPS:
+		if (map->key_size != sizeof(uint32_t)) {
+			errno = EINVAL;
+			return NULL;
+		}
+		idx = *(const uint32_t *)key;
+		if (idx >= map->max_entries) {
+			errno = ENOENT;
+			return NULL;
+		}
+		return (char *)map->array_data + idx * map->value_size;
+
+	case DT_BPF_MAP_TYPE_HASH:
+	case DT_BPF_MAP_TYPE_PERCPU_HASH:
+	case DT_BPF_MAP_TYPE_HASH_OF_MAPS: {
+		uint32_t bucket = hash_key(key, map->key_size, map->num_buckets);
+		rbpf_map_entry_t *entry = map->buckets[bucket];
+
+		while (entry) {
+			if (memcmp(entry->key, key, map->key_size) == 0) {
+				return entry->value;
+			}
+			entry = entry->next;
+		}
+		errno = ENOENT;
+		return NULL;
+	}
+
+	default:
+		errno = EINVAL;
+		return NULL;
 	}
 }
 
@@ -699,6 +756,9 @@ rbpf_prog_load(dt_bpf_prog_type_t type, dt_bpf_attach_type_t attach_type,
 		return -1;
 	}
 
+	/* Allow all memory access for helper-returned pointers */
+	rbpf_vm_allow_all_memory(prog->vm);
+
 	/* Register helpers */
 	for (int i = 0; i < RBPF_MAX_HELPERS; i++) {
 		if (rbpf_ctx.helpers[i])
@@ -911,6 +971,7 @@ static const dt_bpf_backend_ops_t rbpf_backend_ops = {
 
 	.map_create = rbpf_map_create,
 	.map_lookup = rbpf_map_lookup,
+	.map_lookup_ptr = rbpf_map_lookup_ptr,
 	.map_update = rbpf_map_update,
 	.map_delete = rbpf_map_delete,
 	.map_next_key = rbpf_map_next_key,

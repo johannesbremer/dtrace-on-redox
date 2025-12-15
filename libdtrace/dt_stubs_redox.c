@@ -13,11 +13,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <dt_impl.h>
 #include <dt_proc.h>
 #include <dt_program.h>
+#include <dt_ident.h>
+#include <bpf_asm.h>
+#include <linux/bpf.h>
+#include <dtrace/difo.h>
 
 /* Large file support - Redox uses standard open() */
 int open64(const char *path, int flags, ...)
@@ -209,12 +214,6 @@ void dt_pcap_dump(dtrace_hdl_t *dtp, const char *name, uint64_t ts_sec,
 	(void)data; (void)caplen; (void)datalen;
 }
 
-/* dt_pebs.c stubs - PEBS sampling not available on Redox */
-void dt_pebs_exit(dtrace_hdl_t *dtp)
-{
-	(void)dtp;
-}
-
 /* CTF stubs are now in include/sys/ctf_api.h */
 
 /* dt_kern_path_lookup_by_name - dt_cg.c / dt_module.c support */
@@ -286,6 +285,146 @@ int dtrace_program_link(dtrace_hdl_t *dtp, dtrace_prog_t *pgp,
 	(void)objc; (void)objv;
 	/* On Redox, we don't link to ELF - just succeed */
 	return 0;
+}
+
+/*
+ * BPF Library Function Registration for Redox
+ *
+ * On Linux, BPF library functions (dt_bvar_args, dt_bvar_probedesc, etc.)
+ * are compiled into bpf_dlib.o and loaded at runtime. On Redox, we don't
+ * have this ELF file, so we register stub implementations directly.
+ *
+ * Each function is registered with a simple DIFO that returns 0.
+ * This allows D scripts using built-in variables like arg0-arg9 to compile
+ * and run (though they'll get stub values).
+ */
+
+/*
+ * Create a stub DIFO that simply returns 0.
+ * This is used for built-in variable accessor functions on Redox.
+ */
+static dtrace_difo_t *
+dt_create_stub_difo(dtrace_hdl_t *dtp)
+{
+	dtrace_difo_t *dp;
+	struct bpf_insn *insns;
+
+	(void)dtp;  /* unused for now, may be needed for allocation */
+
+	dp = calloc(1, sizeof(dtrace_difo_t));
+	if (dp == NULL)
+		return NULL;
+
+	/*
+	 * Create a minimal BPF program:
+	 *   mov r0, 0   ; return value = 0
+	 *   exit        ; return
+	 */
+	insns = calloc(2, sizeof(struct bpf_insn));
+	if (insns == NULL) {
+		free(dp);
+		return NULL;
+	}
+
+	insns[0] = BPF_MOV_IMM(BPF_REG_0, 0);
+	insns[1] = BPF_RETURN();
+
+	dp->dtdo_buf = insns;
+	dp->dtdo_len = 2;
+	dp->dtdo_refcnt = 1;
+
+	return dp;
+}
+
+/*
+ * Register a single BPF library function with a stub DIFO.
+ */
+static int
+dt_register_bpf_func(dtrace_hdl_t *dtp, const char *name)
+{
+	dt_ident_t *idp;
+	dtrace_difo_t *dp;
+
+	/* Add the function to the BPF symbol table */
+	idp = dt_dlib_add_func(dtp, name);
+	if (idp == NULL)
+		return -1;
+
+	/* Create and attach a stub DIFO */
+	dp = dt_create_stub_difo(dtp);
+	if (dp == NULL)
+		return -1;
+
+	/* Set up the identifier with the DIFO */
+	dt_ident_morph(idp, idp->di_kind, &dt_idops_difo, dtp);
+	dt_ident_set_data(idp, dp);
+
+	return 0;
+}
+
+/*
+ * Initialize BPF library functions for Redox.
+ * This is called from dt_dlib_init() to register stub implementations
+ * of all the BPF library functions that would normally come from bpf_dlib.o.
+ */
+void
+dt_dlib_init_redox(dtrace_hdl_t *dtp)
+{
+	/*
+	 * Register built-in variable accessor functions.
+	 * These are called by the code generator when D scripts use
+	 * variables like arg0, arg1, pid, tid, etc.
+	 */
+	static const char *bvar_funcs[] = {
+		"dt_bvar_args",		/* arg0-arg9, args[] */
+		"dt_bvar_probedesc",	/* probeprov, probemod, probefunc, probename */
+		"dt_bvar_execargs",	/* execargs (command line) */
+		"dt_bvar_caller",	/* caller */
+		"dt_bvar_curcpu",	/* curcpu */
+		"dt_bvar_curthread",	/* curthread */
+		"dt_bvar_epid",		/* epid (enabled probe ID) */
+		"dt_bvar_errno",	/* errno */
+		"dt_bvar_execname",	/* execname */
+		"dt_bvar_gid",		/* gid */
+		"dt_bvar_id",		/* id (probe ID) */
+		"dt_bvar_pid",		/* pid */
+		"dt_bvar_ppid",		/* ppid */
+		"dt_bvar_stackdepth",	/* stackdepth */
+		"dt_bvar_tid",		/* tid */
+		"dt_bvar_timestamp",	/* timestamp */
+		"dt_bvar_ucaller",	/* ucaller */
+		"dt_bvar_uid",		/* uid */
+		"dt_bvar_ustackdepth",	/* ustackdepth */
+		"dt_bvar_walltimestamp", /* walltimestamp */
+		NULL
+	};
+
+	/*
+	 * Register other BPF library functions.
+	 */
+	static const char *other_funcs[] = {
+		"dt_error",		/* Error handling */
+		"dt_get_agg",		/* Aggregation access */
+		"dt_get_dvar",		/* Dynamic variable access */
+		NULL
+	};
+
+	const char **func;
+
+	/* Register built-in variable functions */
+	for (func = bvar_funcs; *func != NULL; func++) {
+		if (dt_register_bpf_func(dtp, *func) != 0) {
+			/* Non-fatal: some functions may not be needed */
+			dt_dprintf("dt_dlib_init_redox: failed to register %s\n", *func);
+		}
+	}
+
+	/* Register other library functions */
+	for (func = other_funcs; *func != NULL; func++) {
+		if (dt_register_bpf_func(dtp, *func) != 0) {
+			dt_dprintf("dt_dlib_init_redox: failed to register %s\n", *func);
+		}
+	}
 }
 
 #endif /* __redox__ */

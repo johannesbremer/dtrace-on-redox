@@ -372,6 +372,10 @@ struct dtrace_hdl {
 	processorid_t dt_beganon; /* CPU that executed BEGIN probe (if any) */
 	processorid_t dt_endedon; /* CPU that executed END probe (if any) */
 	void *dt_beginendargs;	/* args for child running BEGIN and END probes */
+#ifdef __redox__
+	int dt_begin_prog;	/* BPF program handle for BEGIN probe (Redox) */
+	int dt_end_prog;	/* BPF program handle for END probe (Redox) */
+#endif
 	uint_t dt_oflags;	/* dtrace open-time options (see dtrace.h) */
 	uint_t dt_cflags;	/* dtrace compile-time options (see dtrace.h) */
 	uint_t dt_dflags;	/* dtrace link-time options (see dtrace.h) */
