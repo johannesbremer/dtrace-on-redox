@@ -52,6 +52,7 @@
  * but less than RBPF_MAX_HELPERS which is 256)
  */
 #define DT_BPF_FUNC_ktime_get_real_ns	200
+#define DT_BPF_FUNC_get_agg		201
 
 /*
  * User-space perf ring buffer for Redox.
@@ -161,25 +162,23 @@ helper_map_lookup_elem(uint64_t map_fd, uint64_t key_ptr, uint64_t arg2,
 		       uint64_t arg3, uint64_t arg4)
 {
 	void *value_ptr;
-	uint32_t key;
 
 	(void)arg2;
 	(void)arg3;
 	(void)arg4;
 
-	if (dt_bpf_backend == NULL || dt_bpf_backend->map_lookup_ptr == NULL) {
-		fprintf(stderr, "DEBUG map_lookup: backend NULL\n");
-		return 0;  /* NULL pointer */
-	}
+	if (dt_bpf_backend == NULL || dt_bpf_backend->map_lookup_ptr == NULL)
+		return 0;
 
 	if (key_ptr == 0)
 		return 0;
 
-	/* The key_ptr is a pointer in BPF memory - dereference it to get actual key */
-	key = *(uint32_t *)(uintptr_t)key_ptr;
-
-	/* Get a direct pointer to the map value (not a copy) */
-	value_ptr = dt_bpf_backend->map_lookup_ptr((dt_bpf_map_t)map_fd, &key);
+	/*
+	 * Pass the key pointer directly to the backend.
+	 * The backend knows the actual key size for this map.
+	 */
+	value_ptr = dt_bpf_backend->map_lookup_ptr((dt_bpf_map_t)map_fd,
+						   (const void *)(uintptr_t)key_ptr);
 
 	return (uint64_t)(uintptr_t)value_ptr;
 }
@@ -193,20 +192,19 @@ static uint64_t
 helper_map_update_elem(uint64_t map_fd, uint64_t key_ptr, uint64_t value_ptr,
 		       uint64_t flags, uint64_t arg4)
 {
-	uint32_t key;
-	uint32_t val32;
 	int rc;
 
 	(void)arg4;
 
-	key = *(uint32_t *)(uintptr_t)key_ptr;
-	val32 = *(uint32_t *)(uintptr_t)value_ptr;
-
 	if (dt_bpf_backend == NULL || dt_bpf_backend->map_update == NULL)
 		return (uint64_t)-1;
 
+	/*
+	 * Pass pointers directly to the backend.
+	 * The backend knows the actual key and value sizes for this map.
+	 */
 	rc = dt_bpf_backend->map_update((dt_bpf_map_t)map_fd,
-					&key,
+					(const void *)(uintptr_t)key_ptr,
 					(const void *)(uintptr_t)value_ptr,
 					(uint32_t)flags);
 	return (uint64_t)rc;
@@ -299,6 +297,88 @@ helper_ktime_get_real_ns(uint64_t arg0, uint64_t arg1, uint64_t arg2,
 		return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 	return 0;
+}
+
+/*
+ * Helper: dt_get_agg (DTrace-specific)
+ *
+ * Get a pointer to the data storage for an aggregation.
+ * This implements the same logic as bpf/get_agg.c but as a helper function.
+ *
+ * Arguments:
+ *   arg0 (r1): dctx - pointer to DTrace context (dt_dctx_t *)
+ *   arg1 (r2): id - aggregation ID (uint32_t)
+ *   arg2 (r3): key - pointer to aggregation key buffer
+ *   arg3 (r4): ival - initial value for min/max (0 for others)
+ *   arg4 (r5): dflt - pointer to zero-filled default value buffer
+ *
+ * Returns: pointer to aggregation value storage, or 0 on failure
+ */
+static uint64_t
+helper_get_agg(uint64_t dctx_ptr, uint64_t id, uint64_t key_ptr,
+	       uint64_t ival, uint64_t dflt_ptr)
+{
+	/*
+	 * dt_dctx_t layout (from dt_dctx.h):
+	 * The 'agg' field is at offset 64 (8th pointer in the struct).
+	 * It contains the map handle for the per-CPU aggregation hash.
+	 */
+#define DCTX_AGG_OFFSET	64
+	/* agggen map handle - determined by map creation order */
+#define AGGGEN_MAP_HANDLE 3
+
+	uint64_t *genp;
+	uint64_t *valp;
+	uint32_t agg_id = (uint32_t)id;
+	char *key = (char *)(uintptr_t)key_ptr;
+	char *dflt = (char *)(uintptr_t)dflt_ptr;
+	uint64_t agg_map_handle;
+
+	if (dctx_ptr == 0 || key_ptr == 0)
+		return 0;
+
+	/* Look up the generation value for this aggregation ID */
+	genp = (uint64_t *)dt_bpf_backend->map_lookup_ptr(
+		(dt_bpf_map_t)AGGGEN_MAP_HANDLE, &agg_id);
+	if (genp == NULL)
+		return 0;
+
+	/* Place the aggregation ID at the beginning of the key */
+	*(uint32_t *)key = agg_id;
+
+	/* Get the per-CPU aggregation map handle from dctx->agg */
+	agg_map_handle = *(uint64_t *)(dctx_ptr + DCTX_AGG_OFFSET);
+
+	/* Look up existing value in the aggregation map */
+	valp = (uint64_t *)dt_bpf_backend->map_lookup_ptr(
+		(dt_bpf_map_t)agg_map_handle, key);
+
+	/* If not found, or older generation, initialize with defaults */
+	if (valp == NULL || valp[0] < *genp) {
+		int rc;
+
+		/* Start with zero-filled defaults */
+		rc = dt_bpf_backend->map_update(
+			(dt_bpf_map_t)agg_map_handle, key, dflt, 0);
+		if (rc < 0)
+			return 0;
+
+		/* Look up again to get the pointer */
+		valp = (uint64_t *)dt_bpf_backend->map_lookup_ptr(
+			(dt_bpf_map_t)agg_map_handle, key);
+		if (valp == NULL)
+			return 0;
+
+		/* Set initial value for min/max */
+		if (ival != 0)
+			valp[1] = ival;
+
+		/* Set the generation value */
+		valp[0] = *genp;
+	}
+
+	/* Advance past the generation counter to the actual data */
+	return (uint64_t)(uintptr_t)(valp + 1);
 }
 
 /*
@@ -598,6 +678,9 @@ dt_bpf_register_rbpf_helpers(void)
 		rc |= dt_bpf_backend->register_helper(
 			DT_BPF_FUNC_ktime_get_real_ns,
 			(dt_bpf_helper_fn)helper_ktime_get_real_ns);
+		rc |= dt_bpf_backend->register_helper(
+			DT_BPF_FUNC_get_agg,
+			(dt_bpf_helper_fn)helper_get_agg);
 	}
 
 	return rc;

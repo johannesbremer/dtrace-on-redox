@@ -19,10 +19,6 @@ dtrace -l
 ```
 
 ```sh
-dtrace -n 'BEGIN { printf("hello\n"); exit(0); }'
-```
-
-```sh
 dtrace -n 'BEGIN { x = 10; printf("x is %s\n", x > 5 ? "big" : "small"); exit(0); }'
 ```
 
@@ -35,7 +31,5 @@ dtrace -n 'BEGIN { printf("timestamp=%d walltimestamp=%d\n", timestamp, walltime
 ```
 
 ```sh
-dtrace -n 'BEGIN { printf("Starting...\n"); } END { printf("Done!\n"); }'
+dtrace -n 'BEGIN { @c = count(); @c = count(); @c = count(); exit(0); } END { printa(@c); }'
 ```
-
-↑ Press `Ctrl+C` to exit

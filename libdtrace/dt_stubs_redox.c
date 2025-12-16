@@ -299,6 +299,9 @@ int dtrace_program_link(dtrace_hdl_t *dtp, dtrace_prog_t *pgp,
  * and run (though they'll get stub values).
  */
 
+/* DTrace-specific BPF helper ID for dt_get_agg */
+#define DT_BPF_FUNC_get_agg	201
+
 /*
  * Create a stub DIFO that simply returns 0.
  * This is used for built-in variable accessor functions on Redox.
@@ -337,6 +340,45 @@ dt_create_stub_difo(dtrace_hdl_t *dtp)
 }
 
 /*
+ * Create a DIFO that calls a BPF helper function.
+ * This is used for functions like dt_get_agg that need to call
+ * a real helper implementation rather than just returning 0.
+ *
+ * The generated DIFO simply calls the helper and returns its result:
+ *   call <helper_id>
+ *   exit
+ *
+ * Arguments are passed through r1-r5 from the caller.
+ */
+static dtrace_difo_t *
+dt_create_helper_stub_difo(dtrace_hdl_t *dtp, uint32_t helper_id)
+{
+	dtrace_difo_t *dp;
+	struct bpf_insn *insns;
+
+	(void)dtp;
+
+	dp = calloc(1, sizeof(dtrace_difo_t));
+	if (dp == NULL)
+		return NULL;
+
+	insns = calloc(2, sizeof(struct bpf_insn));
+	if (insns == NULL) {
+		free(dp);
+		return NULL;
+	}
+
+	insns[0] = BPF_CALL_HELPER(helper_id);
+	insns[1] = BPF_RETURN();
+
+	dp->dtdo_buf = insns;
+	dp->dtdo_len = 2;
+	dp->dtdo_refcnt = 1;
+
+	return dp;
+}
+
+/*
  * Register a single BPF library function with a stub DIFO.
  */
 static int
@@ -356,6 +398,31 @@ dt_register_bpf_func(dtrace_hdl_t *dtp, const char *name)
 		return -1;
 
 	/* Set up the identifier with the DIFO */
+	dt_ident_morph(idp, idp->di_kind, &dt_idops_difo, dtp);
+	dt_ident_set_data(idp, dp);
+
+	return 0;
+}
+
+/*
+ * Register a BPF library function that calls a BPF helper.
+ * This is used for functions like dt_get_agg that need a real implementation.
+ */
+static int
+dt_register_bpf_func_helper(dtrace_hdl_t *dtp, const char *name,
+    uint32_t helper_id)
+{
+	dt_ident_t *idp;
+	dtrace_difo_t *dp;
+
+	idp = dt_dlib_add_func(dtp, name);
+	if (idp == NULL)
+		return -1;
+
+	dp = dt_create_helper_stub_difo(dtp, helper_id);
+	if (dp == NULL)
+		return -1;
+
 	dt_ident_morph(idp, idp->di_kind, &dt_idops_difo, dtp);
 	dt_ident_set_data(idp, dp);
 
@@ -405,7 +472,6 @@ dt_dlib_init_redox(dtrace_hdl_t *dtp)
 	static const char *other_funcs[] = {
 		"dt_error",		/* Error handling */
 		"dt_probe_error",	/* Probe error handling (fault reporting) */
-		"dt_get_agg",		/* Aggregation access */
 		"dt_get_dvar",		/* Dynamic variable access */
 		"dt_get_assoc",		/* Associative array access */
 		"dt_get_tvar",		/* Thread-local variable access */
@@ -455,6 +521,15 @@ dt_dlib_init_redox(dtrace_hdl_t *dtp)
 		if (dt_register_bpf_func(dtp, *func) != 0) {
 			dt_dprintf("dt_dlib_init_redox: failed to register %s\n", *func);
 		}
+	}
+
+	/*
+	 * Register dt_get_agg with a helper-based implementation.
+	 * This function needs real aggregation logic, not just a return-0 stub.
+	 */
+	if (dt_register_bpf_func_helper(dtp, "dt_get_agg",
+	    DT_BPF_FUNC_get_agg) != 0) {
+		dt_dprintf("dt_dlib_init_redox: failed to register dt_get_agg\n");
 	}
 }
 

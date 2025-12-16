@@ -361,7 +361,6 @@ rbpf_map_lookup_ptr(dt_bpf_map_t handle, const void *key)
 	case DT_BPF_MAP_TYPE_ARRAY:
 	case DT_BPF_MAP_TYPE_PERCPU_ARRAY:
 	case DT_BPF_MAP_TYPE_PERF_EVENT_ARRAY:
-	case DT_BPF_MAP_TYPE_ARRAY_OF_MAPS:
 		if (map->key_size != sizeof(uint32_t)) {
 			errno = EINVAL;
 			return NULL;
@@ -372,6 +371,28 @@ rbpf_map_lookup_ptr(dt_bpf_map_t handle, const void *key)
 			return NULL;
 		}
 		return (char *)map->array_data + idx * map->value_size;
+
+	case DT_BPF_MAP_TYPE_ARRAY_OF_MAPS: {
+		/*
+		 * For array-of-maps, return the inner map handle directly.
+		 * In kernel BPF, this returns a map pointer that can be used
+		 * in subsequent map operations. For rbpf, we return the inner
+		 * map handle cast to a pointer, which the helpers will use.
+		 */
+		uint32_t inner_handle;
+		if (map->key_size != sizeof(uint32_t)) {
+			errno = EINVAL;
+			return NULL;
+		}
+		idx = *(const uint32_t *)key;
+		if (idx >= map->max_entries) {
+			errno = ENOENT;
+			return NULL;
+		}
+		inner_handle = *(uint32_t *)((char *)map->array_data +
+					     idx * map->value_size);
+		return (void *)(uintptr_t)inner_handle;
+	}
 
 	case DT_BPF_MAP_TYPE_HASH:
 	case DT_BPF_MAP_TYPE_PERCPU_HASH:
@@ -608,8 +629,11 @@ rbpf_map_next_key(dt_bpf_map_t handle, const void *key, void *next_key)
 				entry = entry->next;
 			}
 			if (!entry) {
-				errno = ENOENT;
-				return -1;
+				/*
+				 * Key not found. Per Linux kernel behavior,
+				 * return the first key in the map.
+				 */
+				start_bucket = 0;
 			}
 		}
 
