@@ -14,34 +14,28 @@ A zip-file of the application can be downloaded [here](https://nightly.link/joha
 
 ### What's Working
 
-You can list available probes:
-
 ```sh
 dtrace -l
-   ID   PROVIDER            MODULE                          FUNCTION NAME
-    1     dtrace                                                     BEGIN
-    2     dtrace                                                     END
-    3     dtrace                                                     ERROR
-    4    profile                                                     profile-97
-    5    profile                                                     profile-199
-    6    profile                                                     profile-499
-    7    profile                                                     profile-997
-    8    profile                                                     profile-1999
-    9    profile                                                     profile-4001
-   10    profile                                                     profile-4999
-   11    profile                                                     tick-1
-   12    profile                                                     tick-10
-   13    profile                                                     tick-100
-   14    profile                                                     tick-500
-   15    profile                                                     tick-1000
-   16    profile                                                     tick-5000
 ```
-
-And run basic scripts:
 
 ```sh
-dtrace -n 'BEGIN { printf("hello"); exit(0); }'
-dtrace: description 'BEGIN ' matched 1 probe
-CPU     ID                    FUNCTION:NAME
-  0      1                           :BEGIN hello
+dtrace -n 'BEGIN { printf("hello\n"); exit(0); }'
 ```
+
+```sh
+dtrace -n 'BEGIN { x = 10; printf("x is %s\n", x > 5 ? "big" : "small"); exit(0); }'
+```
+
+```sh
+dtrace -n 'BEGIN { printf("pid=%d tid=%d uid=%d\n", pid, tid, uid); exit(0); }'
+```
+
+```sh
+dtrace -n 'BEGIN { printf("timestamp=%d walltimestamp=%d\n", timestamp, walltimestamp); exit(0); }'
+```
+
+```sh
+dtrace -n 'BEGIN { printf("Starting...\n"); } END { printf("Done!\n"); }'
+```
+
+↑ Press `Ctrl+C` to exit
